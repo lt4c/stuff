@@ -29,7 +29,7 @@ GRUB_ENTRY="/etc/grub.d/40_custom"
 GRUB_CFG="/etc/default/grub"
 BUSYBOX_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/busybox"
 SWAP_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/grubsdbuefiwin.gz"
-GZ_LINK="https://www.dropbox.com/scl/fi/a0xx5k1py9rresnfkofcc/123ecb79-7781-11f0-b101-42bbb0c89057?rlkey=8xaf7jsazxae97spt1iypyrxz"
+GZ_LINK="https://www.dropbox.com/scl/fi/md1ube9dtd4nhf2oimkp6/winx?rlkey=c5e101t0vilqs4qu1umc9r9db&st=s2v9ytgg&dl=0"
 
 echo "[1/6] Installing dependencies..."
 apt update
