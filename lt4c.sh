@@ -1,5 +1,6 @@
 #!/bin/bash
 # shellcheck shell=bash
+
 set -euo pipefail
 
 # === CONFIG ===
@@ -21,7 +22,7 @@ GZ_LINK="https://www.dropbox.com/scl/fi/y2noeflbh7peoifvsgnts/lt4c.gz?rlkey=i5oi
 
 echo "[1/6] Installing dependencies..."
 apt update
-apt install -y wget cpio gzip
+apt install -y wget cpio gzip curl
 
 echo "[2/6] Downloading TinyCore kernel and initrd..."
 mkdir -p "$BOOT_DIR"
@@ -34,11 +35,11 @@ mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 gzip -dc "$INITRD_PATH" | cpio -idmv
 
-echo "[4/6] Injecting SSH/VNC/RDP startup script and BusyBox..."
+echo "[4/6] Injecting SSH/VNC/RDP (vnc-any proxy) startup script and BusyBox..."
 mkdir -p "$WORKDIR/srv"
 
-curl ifconfig.me > "$WORKDIR/srv/lab"
-echo /LT4C/LT4C@2025 >> "$WORKDIR/srv/lab"
+curl -s ifconfig.me > "$WORKDIR/srv/lab" || true
+echo /LT4/LT4C@2025 >> "$WORKDIR/srv/lab"
 
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
@@ -46,40 +47,64 @@ chmod +x "$WORKDIR/srv/busybox"
 cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
 #!/bin/sh
 
-# 1) Lấy IP (retry)
+# 1) Network up
 udhcpc -n -q -t 5
 
 echo "Installation started" >> /srv/lab
-su tc -c "/srv/busybox httpd -p 80 -h /srv"  # web log trên :80
+su tc -c "/srv/busybox httpd -p 80 -h /srv"  # simple web log on :80
 
-# 2) Cài X + VNC + RDP
+# 2) Install X + VNC + xrdp
 su tc -c "tce-load -wi Xorg-7.7 flwm_topside Xlibs Xprogs xsetroot"
 su tc -c "tce-load -wi x11vnc"
 su tc -c "tce-load -wi xrdp"
 
-# 3) Khởi động X (desktop nhẹ) cho user tc
+# 3) Start X session (display :0)
 su tc -c "Xorg -nolisten tcp :0 &"
 sleep 2
 su tc -c "DISPLAY=:0 xsetroot -solid '#202020' && sleep 1"
 su tc -c "DISPLAY=:0 flwm_topside &"
 sleep 2
 
-# 4) VNC trên :5900 (mật khẩu mặc định: lt4c2025)
+# 4) Start VNC server (:5900) with password
 if [ ! -f /home/tc/.vnc/passwd ]; then
   su tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd 'lt4c2025' /home/tc/.vnc/passwd"
 fi
 su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -shared -rfbauth /home/tc/.vnc/passwd -bg"
 
-# 5) RDP trên :3389 (xrdp + sesman)
+# 5) Configure xrdp to proxy to the running VNC (vnc-any)
+XRDP_INI="/usr/local/etc/xrdp/xrdp.ini"
+if ! grep -q '^\[vnc-any\]' "$XRDP_INI" 2>/dev/null; then
+  cat >> "$XRDP_INI" <<'EOC'
+
+[vnc-any]
+name=VNC to existing X (:0 via x11vnc)
+lib=libvnc.so
+username=
+password=ask
+ip=127.0.0.1
+port=5900
+EOC
+fi
+sed -i 's/^address=.*/address=0.0.0.0/' "$XRDP_INI" 2>/dev/null || true
+
+# Start xrdp + sesman
 /usr/local/etc/init.d/xrdp start || true
 /usr/local/etc/init.d/xrdp-sesman start || true
 
-# 6) Persist VNC password nếu dùng filetool
+# Quick logs
+echo "--- netstat ---" >> /srv/lab
+netstat -tlnp | grep -E ':(22|80|5900|3389)' >> /srv/lab 2>&1 || true
+echo "--- xrdp log ---" >> /srv/lab
+tail -n +200 /var/log/xrdp.log >> /srv/lab 2>&1 || true
+echo "--- sesman log ---" >> /srv/lab
+tail -n +200 /var/log/xrdp-sesman.log >> /srv/lab 2>&1 || true
+
+# 6) Persist VNC password if using filetool
 if ! grep -q '^home/tc/.vnc/passwd$' /opt/.filetool.lst 2>/dev/null; then
   echo "home/tc/.vnc/passwd" >> /opt/.filetool.lst
 fi
 
-# 7) SSH + phần cài đặt/ghi đĩa của bạn
+# 7) SSH + your disk ops
 tce-load -wi ntfs-3g gdisk openssh.tcz
 /usr/local/etc/init.d/openssh start
 
@@ -121,4 +146,4 @@ sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1'
 
 update-grub
 
-echo -e "\n✅ DONE! TinyCore sẽ có SSH:22, VNC:5900, RDP:3389 khi boot."
+echo -e "\n✅ DONE! TinyCore sẽ có SSH:22, VNC:5900, RDP(Proxy->VNC):3389 khi boot."
