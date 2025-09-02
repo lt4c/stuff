@@ -1,9 +1,25 @@
 #!/bin/bash
 # shellcheck shell=bash
 
+# LT4C — LifeTech4Code
+# Copyright © 2024–2025 LT4C
+# SPDX-License-Identifier: MIT
+#
+# TinyCore boot helper that sets up remote access (SSH/VNC/RDP)
+# and AUTOMATES writing a Bazzite OS image or installer ISO.
+
 set -euo pipefail
 
-# === CONFIG ===
+# === CONFIG (EDIT THESE) ===
+INSTALL_MODE="raw_install"
+INSTALL_DISK="/dev/sda"
+INSTALLER_USB="/dev/sdb"
+
+# NVIDIA GNOME variant
+BAZZITE_IMG_URL="https://github.com/ublue-os/bazzite/releases/latest/download/bazzite-gnome-nvidia-x86_64.img.zst"
+BAZZITE_ISO_URL="https://github.com/ublue-os/bazzite/releases/latest/download/bazzite-gnome-nvidia-x86_64.iso"
+
+# === INTERNALS ===
 TCE_VERSION="14.x"
 ARCH="x86_64"
 TCE_MIRROR="http://tinycorelinux.net"
@@ -14,15 +30,13 @@ INITRD_URL="$TCE_MIRROR/$TCE_VERSION/$ARCH/release/distribution_files/corepure64
 KERNEL_PATH="$BOOT_DIR/vmlinuz64"
 INITRD_PATH="$BOOT_DIR/corepure64.gz"
 INITRD_PATCHED="$BOOT_DIR/corepure64-ssh.gz"
-GRUB_ENTRY="/etc/grub.d/40_custom"
-GRUB_CFG="/etc/default/grub"
 BUSYBOX_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/busybox"
-SWAP_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/grubsdbuefiwin.gz"
-GZ_LINK="https://www.dropbox.com/scl/fi/y2noeflbh7peoifvsgnts/lt4c.gz?rlkey=i5oiiw6po2lrrqh7appo4spo4&st=ecv6ofes&dl=0"
+
+log() { echo "$(date +%F_%T) | $*" | tee -a /srv/lab; }
 
 echo "[1/6] Installing dependencies..."
 apt update
-apt install -y wget cpio gzip curl
+apt install -y wget curl cpio gzip xz-utils zstd
 
 echo "[2/6] Downloading TinyCore kernel and initrd..."
 mkdir -p "$BOOT_DIR"
@@ -35,89 +49,90 @@ mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 gzip -dc "$INITRD_PATH" | cpio -idmv
 
-echo "[4/6] Injecting SSH/VNC/RDP (vnc-any proxy) startup script and BusyBox..."
+echo "[4/6] Injecting bootlocal + tools..."
 mkdir -p "$WORKDIR/srv"
 
-curl -s ifconfig.me > "$WORKDIR/srv/lab" || true
-echo /LT4C/LT4C@2025 >> "$WORKDIR/srv/lab"
+curl -s ifconfig.me > "$WORKDIR/srv/lab"
+echo "/LT4C/LT4C@2025" >> "$WORKDIR/srv/lab"
 
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
 
-cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
+cat > "$WORKDIR/opt/bootlocal.sh" <<'EOF'
 #!/bin/sh
+set -eu
 
-# 1) Network up
-udhcpc -n -q -t 5
+udhcpc -n -q -t 5 || true
+IP_NOW=$(ip -4 -o addr show | awk '/inet/ {print $4}' | paste -sd ' ' -)
+echo "IP: $IP_NOW" >> /srv/lab
+su tc -c "/srv/busybox httpd -p 80 -h /srv"
 
-echo "Installation started" >> /srv/lab
-su tc -c "/srv/busybox httpd -p 80 -h /srv"  # simple web log on :80
+echo "Starting X + VNC/RDP helper..." >> /srv/lab
 
-# 2) Install X + VNC + xrdp
 su tc -c "tce-load -wi Xorg-7.7 flwm_topside Xlibs Xprogs xsetroot"
 su tc -c "tce-load -wi x11vnc"
-su tc -c "tce-load -wi xrdp"
+su tc -c "tce-load -wi xrdp || true"
 
-# 3) Start X session (display :0)
 su tc -c "Xorg -nolisten tcp :0 &"
 sleep 2
 su tc -c "DISPLAY=:0 xsetroot -solid '#202020' && sleep 1"
 su tc -c "DISPLAY=:0 flwm_topside &"
 sleep 2
 
-# 4) Start VNC server (:5900) with password
 if [ ! -f /home/tc/.vnc/passwd ]; then
   su tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd 'lt4c2025' /home/tc/.vnc/passwd"
 fi
 su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -shared -rfbauth /home/tc/.vnc/passwd -bg"
 
-# 5) Configure xrdp to proxy to the running VNC (vnc-any)
-XRDP_INI="/usr/local/etc/xrdp/xrdp.ini"
-if ! grep -q '^\[vnc-any\]' "$XRDP_INI" 2>/dev/null; then
-  cat >> "$XRDP_INI" <<'EOC'
+[ -x /usr/local/etc/init.d/xrdp ] && /usr/local/etc/init.d/xrdp start || true
+[ -x /usr/local/etc/init.d/xrdp-sesman ] && /usr/local/etc/init.d/xrdp-sesman start || true
 
-[vnc-any]
-name=VNC to existing X (:0 via x11vnc)
-lib=libvnc.so
-username=
-password=ask
-ip=127.0.0.1
-port=5900
-EOC
-fi
-sed -i 's/^address=.*/address=0.0.0.0/' "$XRDP_INI" 2>/dev/null || true
+echo "Remote ready: VNC:5900 / RDP:3389 / SSH:22" >> /srv/lab
 
-# Start xrdp + sesman
-/usr/local/etc/init.d/xrdp start || true
-/usr/local/etc/init.d/xrdp-sesman start || true
-
-# Quick logs
-echo "--- netstat ---" >> /srv/lab
-netstat -tlnp | grep -E ':(22|80|5900|3389)' >> /srv/lab 2>&1 || true
-echo "--- xrdp log ---" >> /srv/lab
-tail -n +200 /var/log/xrdp.log >> /srv/lab 2>&1 || true
-echo "--- sesman log ---" >> /srv/lab
-tail -n +200 /var/log/xrdp-sesman.log >> /srv/lab 2>&1 || true
-
-# 6) Persist VNC password if using filetool
 if ! grep -q '^home/tc/.vnc/passwd$' /opt/.filetool.lst 2>/dev/null; then
   echo "home/tc/.vnc/passwd" >> /opt/.filetool.lst
 fi
 
-# 7) SSH + your disk ops
-tce-load -wi ntfs-3g gdisk openssh.tcz
-/usr/local/etc/init.d/openssh start
+ tce-load -wi openssh.tcz
+ /usr/local/etc/init.d/openssh start || true
 
-wget --no-check-certificate -O /tmp/grub.gz "$SWAP_URL"
-gunzip -c /tmp/grub.gz | dd of=/dev/sda bs=4M
-echo formatting sda to GPT NTFS >> /srv/lab
-sgdisk -d 2 /dev/sda
-sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda
-mkfs.ntfs -f /dev/sda2 -L HDD_DATA
-sh -c '(wget --no-check-certificate -O- "$GZ_LINK" | gunzip | dd of=/dev/sdb bs=4M) & i=0; while kill -0 $(pidof dd) 2>/dev/null; do echo "Installing... (${i}s)" | tee -a /srv/lab; sleep 1; i=$((i+1)); done; echo "Done in ${i}s" | tee -a /srv/lab'
+# After installation, auto-enable RDP on first Bazzite boot
+cat > /mnt/sda/etc/rc.d/rc.local <<'EORDP'
+#!/bin/bash
+if command -v rpm-ostree >/dev/null; then
+  rpm-ostree install xrdp
+  systemctl enable --now xrdp
+fi
+EORDP
+chmod +x /mnt/sda/etc/rc.d/rc.local
 
-echo "Waiting 60s before reboot for debug..." | tee -a /srv/lab
-sleep 60
+echo "INSTALL_MODE=\$INSTALL_MODE" >> /srv/lab
+
+stream_to_disk() {
+  SRC_URL="$1"; TARGET_DEV="$2"; LABEL="$3"
+  echo "Writing $LABEL to $TARGET_DEV from $SRC_URL" | tee -a /srv/lab
+  case "$SRC_URL" in
+    *.img.gz|*.gz)
+      wget --no-check-certificate -O- "$SRC_URL" | gunzip -c | dd of="$TARGET_DEV" bs=4M status=progress conv=fsync ;;
+    *.img.zst|*.zst)
+      wget --no-check-certificate -O- "$SRC_URL" | zstd -d -c | dd of="$TARGET_DEV" bs=4M status=progress conv=fsync ;;
+    *.img|*.iso)
+      wget --no-check-certificate -O- "$SRC_URL" | dd of="$TARGET_DEV" bs=4M status=progress conv=fsync ;;
+    *)
+      echo "Unknown image format for $SRC_URL" | tee -a /srv/lab; return 1 ;;
+  esac
+  sync
+}
+
+# Simplified: always raw_install
+BAZZITE_IMG_URL="$BAZZITE_IMG_URL"
+INSTALL_DISK="$INSTALL_DISK"
+
+sleep 10
+dd if=/dev/zero of="$INSTALL_DISK" bs=1M count=10 conv=fsync || true
+stream_to_disk "$BAZZITE_IMG_URL" "$INSTALL_DISK" "Bazzite RAW"
+echo "Raw image written. Rebooting in 15s..." | tee -a /srv/lab
+sleep 15
 reboot
 EOF
 
@@ -127,23 +142,25 @@ echo "[5/6] Repacking patched initrd..."
 cd "$WORKDIR"
 find . | cpio -o -H newc | gzip -c > "$INITRD_PATCHED"
 
+GRUB_ENTRY="/etc/grub.d/40_custom"
+GRUB_CFG="/etc/default/grub"
+
 echo "[6/6] Adding GRUB entry and setting default..."
-if ! grep -q "🔧 TinyCore SSH Auto" "$GRUB_ENTRY"; then
+if ! grep -q "🔧 TinyCore Bazzite Helper" "$GRUB_ENTRY"; then
 cat <<EOF >> "$GRUB_ENTRY"
 
-menuentry "🔧 TinyCore SSH Auto" {
+menuentry "🔧 TinyCore Bazzite Helper" {
     insmod part_gpt
     insmod ext2
-    linux $KERNEL_PATH console=ttyS0 quiet
+    linux $KERNEL_PATH console=ttyS0 quiet INSTALL_MODE=raw_install INSTALL_DISK=$INSTALL_DISK BAZZITE_IMG_URL=$BAZZITE_IMG_URL
     initrd $INITRD_PATCHED
 }
 EOF
 fi
 
-# Set as default boot
-sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="🔧 TinyCore SSH Auto"/' "$GRUB_CFG" || echo 'GRUB_DEFAULT="🔧 TinyCore SSH Auto"' >> "$GRUB_CFG"
+sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="🔧 TinyCore Bazzite Helper"/' "$GRUB_CFG" || echo 'GRUB_DEFAULT="🔧 TinyCore Bazzite Helper"' >> "$GRUB_CFG"
 sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1' >> "$GRUB_CFG"
 
 update-grub
 
-echo -e "\n✅ DONE! TinyCore sẽ có SSH:22, VNC:5900, RDP(Proxy->VNC):3389 khi boot."
+echo -e "\n✅ DONE! Reboot to enter TinyCore; SSH:22, VNC:5900, RDP:3389. Bazzite NVIDIA image will be written to /dev/sda and RDP auto-enabled on first boot."
