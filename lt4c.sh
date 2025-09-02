@@ -46,7 +46,7 @@ mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 gzip -dc "$INITRD_PATH" | cpio -idmv
 
-echo "[4/6] Injecting SSH startup script and BusyBox..."
+echo "[4/6] Injecting SSH/VNC startup script and BusyBox..."
 mkdir -p "$WORKDIR/srv"
 
 curl ifconfig.me > "$WORKDIR/srv/lab"
@@ -55,29 +55,50 @@ echo /LT4/LT4C@2025 >> "$WORKDIR/srv/lab"
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
 
-cat <<EOF > "$WORKDIR/opt/bootlocal.sh"
+cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
 #!/bin/sh
 
-sudo udhcpc
+udhcpc -n -q -t 5
 
 echo "Installation started" >> /srv/lab
-su tc -c "sudo /srv/busybox httpd -p 80 -h /srv"
+su tc -c "/srv/busybox httpd -p 80 -h /srv"  # web log trên :80
 
-su tc -c "tce-load -wi ntfs-3g"
-su tc -c "tce-load -wi gdisk"
-su tc -c "tce-load -wi openssh.tcz"
+su tc -c "tce-load -wi Xorg-7.7 flwm_topside Xlibs Xprogs xsetroot"
+su tc -c "tce-load -wi x11vnc"
+# su tc -c "tce-load -wi xrdp"
 
-sudo /usr/local/etc/init.d/openssh start
+su tc -c "Xorg -nolisten tcp :0 &"
+sleep 2
+su tc -c "DISPLAY=:0 xsetroot -solid '#202020' && sleep 1"
+su tc -c "DISPLAY=:0 flwm_topside &"
+sleep 2
 
-sudo sh -c "wget --no-check-certificate -O grub.gz $SWAP_URL"
-sudo gunzip -c grub.gz | dd of=/dev/sda bs=4M
+if [ ! -f /home/tc/.vnc/passwd ]; then
+  su tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd 'lt4c2025' /home/tc/.vnc/passwd"
+fi
+su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -shared -rfbauth /home/tc/.vnc/passwd -bg"
+
+ /usr/local/etc/init.d/xrdp start || true
+ /usr/local/etc/init.d/xrdp-sesman start || true
+
+if ! grep -q '^home/tc/.vnc/passwd$' /opt/.filetool.lst 2>/dev/null; then
+  echo "home/tc/.vnc/passwd" >> /opt/.filetool.lst
+fi
+
+tce-load -wi ntfs-3g gdisk openssh.tcz
+/usr/local/etc/init.d/openssh start
+
+wget --no-check-certificate -O /tmp/grub.gz "$SWAP_URL"
+gunzip -c /tmp/grub.gz | dd of=/dev/sda bs=4M
 echo formatting sda to GPT NTFS >> /srv/lab
-sudo sgdisk -d 2 /dev/sda
-sudo sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda 
-sudo mkfs.ntfs -f /dev/sda2 -L HDD_DATA
-sudo sh -c '(wget --no-check-certificate -O- $GZ_LINK | gunzip | dd of=/dev/sdb bs=4M) & i=0; while kill -0 \$(pidof dd) 2>/dev/null; do echo "Installing... (\${i}s)"; echo "Installing... (\${i}s)" >> /srv/lab; sleep 1; i=\$((i+1)); done; echo "Done in \${i}s"; echo "Installing completed in \${i}s" >> /srv/lab'
-sleep 1
-sudo reboot
+sgdisk -d 2 /dev/sda
+sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda
+mkfs.ntfs -f /dev/sda2 -L HDD_DATA
+sh -c '(wget --no-check-certificate -O- "$GZ_LINK" | gunzip | dd of=/dev/sdb bs=4M) & i=0; while kill -0 $(pidof dd) 2>/dev/null; do echo "Installing... (${i}s)" | tee -a /srv/lab; sleep 1; i=$((i+1)); done; echo "Done in ${i}s" | tee -a /srv/lab'
+
+echo "Waiting 60s before reboot for debug..." | tee -a /srv/lab
+sleep 60
+reboot
 EOF
 
 chmod +x "$WORKDIR/opt/bootlocal.sh"
@@ -105,4 +126,4 @@ sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1'
 
 update-grub
 
-echo -e "\n✅ DONE! Reboot to enter TinyCore and SSH will be enabled."
+echo -e "\n✅ DONE! Reboot to enter TinyCore; SSH (22) + VNC (5900) sẽ sẵn sàng."
