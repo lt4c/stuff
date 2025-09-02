@@ -29,7 +29,7 @@ GRUB_ENTRY="/etc/grub.d/40_custom"
 GRUB_CFG="/etc/default/grub"
 BUSYBOX_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/busybox"
 SWAP_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/grubsdbuefiwin.gz"
-GZ_LINK="http://222.112.246.11:3000/galaxy-river-lion-code-bamboo-melody-rocket-pearl-shadow-cactus-dragon-sunset-echo-silk-cyber-guitar-honey-wind-temple-ice-mirror-cloud-phoenix-stone-flame/lt4c.gz"
+GZ_LINK="https://www.dropbox.com/scl/fi/y2noeflbh7peoifvsgnts/lt4c.gz?rlkey=i5oiiw6po2lrrqh7appo4spo4&st=ecv6ofes&dl=0"
 
 echo "[1/6] Installing dependencies..."
 apt update
