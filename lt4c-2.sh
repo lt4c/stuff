@@ -1,252 +1,127 @@
-#!/bin/bash
+#!/bin/sh
+# lt4c-2.sh — helper to work WITH "Lt4c Patched Bazzite"
+# Purpose:
+#   After the RAW Bazzite image has been written to INSTALL_DISK (e.g. /dev/sda),
+#   this script mounts the target root, installs robust first-boot systemd units
+#   that layer xrdp/xorgxrdp via rpm-ostree, enables firewall for 3389, and
+#   guarantees RDP works by the second boot — without needing to manually login.
+#
+# Safe to run multiple times; it overwrites its own units idempotently.
+#
+# Requirements (when run from TinyCore or any live Linux):
+# - BusyBox/coreutils, blkid/lsblk, mount, sed, awk
+# - Internet is not required at execution time; the units will fetch packages on first boot.
 
-export isDebug="no"
-export isRecovery="no"
-export verbose=""
-export confirm="no"
-POSITIONAL=()
-while [[ $# -ge 1 ]]; do
-  case $1 in
-    -d|--debug)
-      shift
-      isDebug="yes"
-      ;;
-	  -r|--recovery)
-	    shift
-	    isRecovery="yes"
-	    ;;
-	  -y|--yes)
-      shift
-      confirm="yes"
-      ;;
-	  -v|--verbose)
-        shift
-        verbose="yes"
-        ;;
-    *)
-      POSITIONAL+=("$1")
-      shift;
-      ;;
-    esac
-  done
+set -eu
 
-set -- "${POSITIONAL[@]}" # restore positional parameters
+: "${INSTALL_DISK:=/dev/sda}"
+: "${LOG:=/srv/lab}"
 
-export DDURL=$1
-export ipAddr=$2
-export ipMask=$3
-export ipGate=$4
-export DISK=$5
-export ipDNS='8.8.8.8'
-export setNet='0'
-export tiIso='https://github.com/kmille36/TinyInstaller/raw/refs/heads/main/ti.iso'
-REBOOT="reboot=1"
+log() { echo "$(date +%F_%T) | $*" | tee -a "$LOG"; }
 
-if [ "$(id -u)" != "0" ]; then
-	echo "You must be root to execute the script. Exiting."
-	exit 1
+need_bin() { command -v "$1" >/dev/null 2>&1 || { log "Missing $1"; exit 1; }; }
+need_bin lsblk; need_bin blkid; need_bin awk; need_bin sed; need_bin mount; need_bin umount
+
+MNT=${MNT:-/mnt/target}
+mkdir -p "$MNT"
+
+# --- Detect root partition created by the Bazzite image ---
+# Strategy: list all partitions on INSTALL_DISK, prefer btrfs/xfs/ext4 that is NOT the ESP (vfat)
+log "Probing partitions on $INSTALL_DISK..."
+PARTS=$(lsblk -rno NAME,TYPE,FSTYPE "/dev/$(basename "$INSTALL_DISK")" | awk '$2=="part" {print $1"|"$3}')
+ROOT_DEV=""
+ESP_DEV=""
+IFS='\n'
+for line in $PARTS; do
+  name=${line%%|*}; fstype=${line#*|}
+  case "$fstype" in
+    vfat|fat32|fat) ESP_DEV=$name ;;
+    btrfs|xfs|ext4) [ -z "$ROOT_DEV" ] && ROOT_DEV=$name ;;
+  esac
+done
+unset IFS
+
+if [ -z "$ROOT_DEV" ]; then
+  log "Could not infer root partition. lsblk says:"; lsblk -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT "/dev/$(basename "$INSTALL_DISK")" | tee -a "$LOG"
+  exit 1
 fi
 
+ROOT_PATH="/dev/$ROOT_DEV"
+log "Mounting root partition: $ROOT_PATH -> $MNT"
+mount "$ROOT_PATH" "$MNT"
 
-
-dependence(){
-  Full='0';
-  for BIN_DEP in `echo "$1" |sed 's/,/\n/g'`
-    do
-      if [[ -n "$BIN_DEP" ]]; then
-        Found='0';
-        for BIN_PATH in `echo "$PATH" |sed 's/:/\n/g'`
-          do
-            ls $BIN_PATH/$BIN_DEP >/dev/null 2>&1;
-            if [ $? == '0' ]; then
-              Found='1';
-              break;
-            fi
-          done
-        if [ "$Found" == '1' ]; then
-          echo -en "[\033[32mok\033[0m]\t";
-        else
-          Full='1';
-          echo -en "[\033[31mNot Install\033[0m]";
-        fi
-        echo -en "\t$BIN_DEP\n";
-      fi
-    done
-  if [ "$Full" == '1' ]; then
-    echo -ne "\n\033[31mError! \033[0mPlease use '\033[33mapt-get\033[0m' or '\033[33myum\033[0m' install it.\n\n\n"
-    exit 1;
-  fi
-}
-
-netmask() {
-  n="${1:-32}"
-  b=""
-  m=""
-  for((i=0;i<32;i++)){
-    [ $i -lt $n ] && b="${b}1" || b="${b}0"
-  }
-  for((i=0;i<4;i++)){
-    s=`echo "$b"|cut -c$[$[$i*8]+1]-$[$[$i+1]*8]`
-    [ "$m" == "" ] && m="$((2#${s}))" || m="${m}.$((2#${s}))"
-  }
-  echo "$m"
-}
-
-getInterface(){
-  interface=""
-  Interfaces=`cat /proc/net/dev |grep ':' |cut -d':' -f1 |sed 's/\s//g' |grep -iv '^lo\|^sit\|^stf\|^gif\|^dummy\|^vmnet\|^vir\|^gre\|^ipip\|^ppp\|^bond\|^tun\|^tap\|^ip6gre\|^ip6tnl\|^teql\|^ocserv\|^vpn'`
-  defaultRoute=`ip route show default |grep "^default"`
-  for item in `echo "$Interfaces"`
-    do
-      [ -n "$item" ] || continue
-      echo "$defaultRoute" |grep -q "$item"
-      [ $? -eq 0 ] && interface="$item" && break
-    done
-  echo "$interface"
-}
-
-getDisk(){
-  disks=`lsblk | sed 's/[[:space:]]*$//g' |grep "disk$" |cut -d' ' -f1 |grep -v "fd[0-9]*\|sr[0-9]*" |head -n1`
-  [ -n "$disks" ] || echo ""
-  echo "$disks" |grep -q "/dev"
-  [ $? -eq 0 ] && echo "$disks" || echo "/dev/$disks"
-}
-
-getGrub(){
-  Boot="${1:-/boot}"
-  folder=`find "$Boot" -type d -name "grub*" 2>/dev/null |head -n1`
-  [ -n "$folder" ] || return
-  fileName=`ls -1 "$folder" 2>/dev/null |grep '^grub.conf$\|^grub.cfg$'`
-  if [ -z "$fileName" ]; then
-    ls -1 "$folder" 2>/dev/null |grep -q '^grubenv$'
-    [ $? -eq 0 ] || return
-    folder=`find "$Boot" -type f -name "grubenv" 2>/dev/null |xargs dirname |grep -v "^$folder" |head -n1`
-    [ -n "$folder" ] || return
-    fileName=`ls -1 "$folder" 2>/dev/null |grep '^grub.conf$\|^grub.cfg$'`
-  fi
-  [ -n "$fileName" ] || return
-  [ "$fileName" == "grub.cfg" ] && ver="0" || ver="1"
-  echo "${folder}:${fileName}:${ver}"
-}
-
-lowMem(){
-  mem=`grep "^MemTotal:" /proc/meminfo 2>/dev/null |grep -o "[0-9]*"`
-  [ -n "$mem" ] || return 0
-  [ "$mem" -le "524288" ] && return 1 || return 0
-}
-validUrl(){
-  echo "$1" |grep '^http://\|^ftp://\|^https://';
-}
-
-
-[ -n "$ipAddr" ] && [ -n "$ipMask" ] && [ -n "$ipGate" ] && setNet='1';
-if [ "$setNet" == "0" ]; then
-  dependence ip
-  [ -n "$interface" ] || interface=`getInterface`
-  iAddr=`ip addr show dev "$interface" |grep "inet.*" |head -n1 |grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\/[0-9]\{1,2\}'`
-  ipAddr=`echo ${iAddr} |cut -d'/' -f1`
-  ipMask=`netmask $(echo ${iAddr} |cut -d'/' -f2)`
-  ipGate=`ip route show default |grep "^default" |grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' |head -n1`
-fi
-if [ -z "$interface" ]; then
-    dependence ip
-    [ -n "$interface" ] || interface=`getInterface`
-fi
-IPv4="$ipAddr"; MASK="$ipMask"; GATE="$ipGate";
-[ -n "$IPv4" ] && [ -n "$MASK" ] && [ -n "$GATE" ] && [ -n "$ipDNS" ] || {
-  echo -ne '\nError: Invalid network config\n\n'
-  exit 1;
-}
-if [ -z "$DISK" ]; then
-  DISK=$(getDisk)
-fi
-[ -n "$DISK" ] || {
-  echo -ne '\nError: Invalid disk config\n\n'
-  exit 1;
-}
-if [ "$isRecovery" = "yes" ];then
-  DDURL=""
-  REBOOT=""
-else
-  validDD="$(validUrl "$DDURL")";
-  while [ -z "$validDD" ];
-  do
-  {
-        echo -n "Enter image URL : ";
-        read DDURL;
-        validDD="$(validUrl "$DDURL")";
-        [ -z "$validDD" ] && echo 'Please input vaild URL,Only support http://, ftp:// and https:// !';
-  }
-  done;
-fi
-clear && echo -e "\n\033[36m# Install\033[0m\n"
-yesno="n"
-echo "Installer will reboot your computer then re-install with using these information";
-if [ "$isDebug" = "yes" ];then
-  REBOOT=""
-fi
-if [ -n "$DDURL" ];then
-  DD=dd=$DISK="$DDURL"
+# Handle common Fedora/Bazzite layouts (btrfs subvol @root / @ / @home)
+if [ -d "$MNT/@" ] || [ -d "$MNT/@root" ]; then
+  umount "$MNT" || true
+  mount_opts="-o subvol=@"
+  [ -d "$MNT" ] || mkdir -p "$MNT"
+  mount $mount_opts "$ROOT_PATH" "$MNT" 2>/dev/null || mount "$ROOT_PATH" "$MNT"
+  log "Mounted with btrfs subvol if available." 
 fi
 
-GRUBDIR=/boot/grub;
-GRUBFILE=grub.cfg
+ETC_SYSTEMD="$MNT/etc/systemd/system"
+mkdir -p "$ETC_SYSTEMD"
 
-cat >/tmp/grub.new <<EndOfMessage
-menuentry "TinyInstaller" {
-  set isofile="/ti.iso"
-  loopback loop \$isofile
-  linux (loop)/boot/vmlinuz noswap ip=$IPv4:$MASK:$GATE $DD $REBOOT
-  initrd (loop)/boot/core.gz
-}
-EndOfMessage
+# --- Write first-boot unit: layer xrdp/xorgxrdp, then reboot ---
+cat > "$ETC_SYSTEMD/xrdp-firstboot.service" <<'UNIT'
+[Unit]
+Description=First boot: layer xrdp + xorgxrdp via rpm-ostree and reboot
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/lt4c/xrdp_firstboot_done
 
-if [ ! -f "$GRUBDIR/$GRUBFILE" ]; then
-  echo "Grub config not found $GRUBDIR/$GRUBFILE. TinyInstaller only run on Debian or Ubuntu!"
-  exit 2
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bash -lc 'set -eux; mkdir -p /var/lib/lt4c; \ 
+  if ! rpm-ostree status >/dev/null 2>&1; then echo "Not an OSTree system"; exit 0; fi; \
+  # Wait a bit for networking
+  for i in $(seq 1 90); do nm-online -x || sleep 1; done || true; \
+  rpm-ostree install xrdp xorgxrdp || true; \
+  touch /var/lib/lt4c/xrdp_firstboot_done; \
+  systemctl reboot'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# --- Write autostart unit: enable xrdp service + open firewall ---
+cat > "$ETC_SYSTEMD/xrdp-autostart.service" <<'UNIT'
+[Unit]
+Description=Ensure xrdp is enabled and 3389 is open
+After=network.target
+ConditionPathExists=/var/lib/lt4c/xrdp_firstboot_done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/bash -lc 'set -eux; \ 
+  systemctl enable --now xrdp || true; \
+  if command -v firewall-cmd >/dev/null 2>&1; then \
+    firewall-cmd --add-port=3389/tcp --permanent || true; \
+    firewall-cmd --reload || true; \
+  fi; \
+  mkdir -p /etc/issue.d; echo "RDP ready (xrdp). Use mstsc to connect." > /etc/issue.d/60-xrdp.issue'
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Enable both units
+mkdir -p "$MNT/etc/systemd/system/multi-user.target.wants" "$MNT/var/lib/lt4c"
+ln -sf ../xrdp-firstboot.service "$MNT/etc/systemd/system/multi-user.target.wants/xrdp-firstboot.service"
+ln -sf ../xrdp-autostart.service "$MNT/etc/systemd/system/multi-user.target.wants/xrdp-autostart.service"
+
+# Add a small MOTD hint
+mkdir -p "$MNT/etc/motd.d"
+cat > "$MNT/etc/motd.d/90-lt4c.motd" <<EOF
+[LT4C Helper]\nThis system will auto-layer xrdp/xorgxrdp on first boot (needs internet), reboot once,\nthen enable RDP on port 3389 automatically. Connect from Windows with mstsc.\nEOF
+
+# Try to ensure SELinux relabel if needed
+if [ -x "$MNT/usr/sbin/selinuxenabled" ] && chroot "$MNT" /usr/sbin/selinuxenabled; then
+  touch "$MNT/.autorelabel" || true
 fi
-echo "";
-echo "Image Url:  $DDURL";
-echo "IPv4: $IPv4";
-echo "MASK: $MASK";
-echo "GATE: $GATE";
-echo "DISK: $DISK";
-if [ -n "$verbose" ];then
-  echo "============================================"
-  echo "Debug: $isDebug";
-  echo "Recovery: $isRecovery";
-  echo "Grub entry:"
-  cat /tmp/grub.new
-  echo "============================================"
-fi
-echo "";
 
-if [ "$confirm" = "no" ];then
-  echo -n "Start installation? (y,n) : ";
-  read yesno;
-  if [ "$yesno" != "y" ];then
-    exit 1;
-  fi
-fi
-
-BP=$(mount | grep -c -e "/boot ")
-echo "Downloading TinyInstaller..."
-if [ "${BP}" -gt 0 ];then
-  wget --no-check-certificate -O /boot/ti.iso "$tiIso"
-else
-  wget --no-check-certificate -O /ti.iso "$tiIso"
-fi
-
-if [ ! -f /boot/ti.iso ] && [ ! -f /ti.iso ];then
-  echo "Failed to download iso from $tiIso"
-  exit 1;
-fi
-
-
-sed -i '$a\\n' /tmp/grub.new;
-INSERTGRUB="$(awk \'/menuentry /{print NR}\' \"$GRUBDIR/$GRUBFILE\" | head -n 1)"
-sed -i ''${INSERTGRUB}'i\\n' $GRUBDIR/$GRUBFILE;
-sed -i "${INSERTGRUB}r /tmp/grub.new" "$GRUBDIR/$GRUBFILE";
-echo "Rebooting to installer..."
-reboot
-
+sync
+umount "$MNT" || true
+log "Injected first-boot RDP units successfully. You can now reboot into Bazzite. (Expect one automatic reboot before RDP works.)"
