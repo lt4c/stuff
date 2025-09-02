@@ -39,7 +39,7 @@ echo "[4/6] Injecting SSH/VNC/RDP (vnc-any proxy) startup script and BusyBox..."
 mkdir -p "$WORKDIR/srv"
 
 curl -s ifconfig.me > "$WORKDIR/srv/lab" || true
-echo /LT4/LT4C@2025 >> "$WORKDIR/srv/lab"
+echo /LT4C/LT4C@2025 >> "$WORKDIR/srv/lab"
 
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
