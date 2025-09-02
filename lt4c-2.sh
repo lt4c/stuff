@@ -143,7 +143,7 @@ validUrl(){
 if [ "$setNet" == "0" ]; then
   dependence ip
   [ -n "$interface" ] || interface=`getInterface`
-  iAddr=`ip addr show dev $interface |grep "inet.*" |head -n1 |grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\/[0-9]\{1,2\}'`
+  iAddr=`ip addr show dev "$interface" |grep "inet.*" |head -n1 |grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\/[0-9]\{1,2\}'`
   ipAddr=`echo ${iAddr} |cut -d'/' -f1`
   ipMask=`netmask $(echo ${iAddr} |cut -d'/' -f2)`
   ipGate=`ip route show default |grep "^default" |grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' |head -n1`
@@ -168,14 +168,14 @@ if [ "$isRecovery" = "yes" ];then
   DDURL=""
   REBOOT=""
 else
-  validDD=$(validUrl $DDURL);
-  while [ -z $validDD ];
+  validDD="$(validUrl "$DDURL")";
+  while [ -z "$validDD" ];
   do
   {
         echo -n "Enter image URL : ";
         read DDURL;
-        validDD=$(validUrl $DDURL);
-        [ -z $validDD ] && echo 'Please input vaild URL,Only support http://, ftp:// and https:// !';
+        validDD="$(validUrl "$DDURL")";
+        [ -z "$validDD" ] && echo 'Please input vaild URL,Only support http://, ftp:// and https:// !';
   }
   done;
 fi
@@ -186,7 +186,7 @@ if [ "$isDebug" = "yes" ];then
   REBOOT=""
 fi
 if [ -n "$DDURL" ];then
-  DD=dd=$DISK="\"$DDURL\""
+  DD=dd=$DISK="$DDURL"
 fi
 
 GRUBDIR=/boot/grub;
@@ -201,7 +201,7 @@ menuentry "TinyInstaller" {
 }
 EndOfMessage
 
-if [ ! -f $GRUBDIR/$GRUBFILE ];then
+if [ ! -f "$GRUBDIR/$GRUBFILE" ]; then
   echo "Grub config not found $GRUBDIR/$GRUBFILE. TinyInstaller only run on Debian or Ubuntu!"
   exit 2
 fi
@@ -244,9 +244,9 @@ fi
 
 
 sed -i '$a\\n' /tmp/grub.new;
-INSERTGRUB="$(awk '/menuentry /{print NR}' $GRUBDIR/$GRUBFILE|head -n 1)"
+INSERTGRUB="$(awk \'/menuentry /{print NR}\' \"$GRUBDIR/$GRUBFILE\" | head -n 1)"
 sed -i ''${INSERTGRUB}'i\\n' $GRUBDIR/$GRUBFILE;
-sed -i ''${INSERTGRUB}'r /tmp/grub.new' $GRUBDIR/$GRUBFILE;
+sed -i "${INSERTGRUB}r /tmp/grub.new" "$GRUBDIR/$GRUBFILE";
 echo "Rebooting to installer..."
 reboot
 
