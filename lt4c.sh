@@ -1,205 +1,145 @@
-#!/bin/bash
-# shellcheck shell=bash
+#!/usr/bin/env bash
+# lt4c.sh — XFCE + XRDP + VNC (:0/5900, pass lt4c) + Firefox/Steam (Flatpak)
+set -Eeuo pipefail
 
-# LT4C — LifeTech4Code
-# Copyright © 2024–2025 LT4C
-# SPDX-License-Identifier: MIT
-#
-# TinyCore boot helper that sets up remote access (SSH/VNC/RDP)
-# and AUTOMATES writing a Bazzite OS image or installer ISO.
+# ======================= CONFIG =======================
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export APT_LISTCHANGES_FRONTEND=none
+LOG="/var/log/a_sh_install.log"
+USER_NAME="lt4c"
+USER_PASS="LT4C@2025"
+VNC_PASS="lt4c"
+GEOM="1920x1080"
 
-set -euo pipefail
+step(){ echo "[BƯỚC] $*"; }
 
-# === CONFIG (EDIT THESE) ===
-INSTALL_MODE="raw_install"
-INSTALL_DISK="/dev/sda"
-INSTALLER_USB="/dev/sdb"
+# =================== INSTALL tmux FIRST ===================
+: >"$LOG"
+apt update -qq >>"$LOG" 2>&1 || true
+apt -y install tmux >>"$LOG" 2>&1 || true
 
-# NVIDIA GNOME variant
-BAZZITE_IMG_URL="https://github.com/ublue-os/bazzite/releases/latest/download/bazzite-gnome-nvidia-x86_64.img.zst"
-BAZZITE_ISO_URL="https://github.com/ublue-os/bazzite/releases/latest/download/bazzite-gnome-nvidia-x86_64.iso"
+# =================== INSTALLER ====================
+# 0) Chuẩn bị -------------------------------------------------------
+step "0/8 Chuẩn bị"
+mkdir -p /etc/needrestart/conf.d
+echo '$nrconf{restart} = "a";' >/etc/needrestart/conf.d/zzz-auto.conf || true
+apt -y purge needrestart >>"$LOG" 2>&1 || true
+systemctl stop unattended-upgrades >>"$LOG" 2>&1 || true
+systemctl disable unattended-upgrades >>"$LOG" 2>&1 || true
 
-# === INTERNALS ===
-TCE_VERSION="14.x"
-ARCH="x86_64"
-TCE_MIRROR="http://tinycorelinux.net"
-BOOT_DIR="/boot/tinycore"
-WORKDIR="/tmp/tinycore_initrd"
-KERNEL_URL="$TCE_MIRROR/$TCE_VERSION/$ARCH/release/distribution_files/vmlinuz64"
-INITRD_URL="$TCE_MIRROR/$TCE_VERSION/$ARCH/release/distribution_files/corepure64.gz"
-KERNEL_PATH="$BOOT_DIR/vmlinuz64"
-INITRD_PATH="$BOOT_DIR/corepure64.gz"
-INITRD_PATCHED="$BOOT_DIR/corepure64-ssh.gz"
-BUSYBOX_URL="https://raw.githubusercontent.com/lt4c/stuff/main/busybox"
+apt -y -o Dpkg::Use-Pty=0 install \
+  curl wget ca-certificates gnupg lsb-release apt-transport-https software-properties-common \
+  sudo dbus-x11 xdg-utils desktop-file-utils >>"$LOG" 2>&1
 
-log() { echo "$(date +%F_%T) | $*" | tee -a /srv/lab; }
+# 1) User ----------------------------------------------------------------------
+step "1/8 Tạo user ${USER_NAME}"
+if ! id -u "$USER_NAME" >/dev/null 2>&1; then
+  adduser --disabled-password --gecos "LT4C" "$USER_NAME" >>"$LOG" 2>&1
+  echo "${USER_NAME}:${USER_PASS}" | chpasswd
+  usermod -aG sudo "$USER_NAME"
+fi
 
-echo "[1/6] Installing dependencies..."
-apt update
-apt install -y wget curl cpio gzip xz-utils zstd
+# 2) VS Code repo + i386 + multiverse -----------------------------------------
+step "2/8 VSCode repo + i386 (Proton) + multiverse"
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
+chmod a+r /etc/apt/keyrings/microsoft.gpg
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
+  >/etc/apt/sources.list.d/vscode.list
+add-apt-repository -y multiverse >>"$LOG" 2>&1 || true
+dpkg --add-architecture i386 >>"$LOG" 2>&1 || true
+apt update -qq >>"$LOG" 2>&1
 
-echo "[2/6] Downloading TinyCore kernel and initrd..."
-mkdir -p "$BOOT_DIR"
-wget -q -O "$KERNEL_PATH" "$KERNEL_URL"
-wget -q -O "$INITRD_PATH" "$INITRD_URL"
+# 3) One-shot APT install ------------------------------------------------------
+step "3/8 Cài XFCE + XRDP + VNC + App"
+apt -y install \
+  xfce4 xfce4-goodies xorg \
+  xrdp xorgxrdp pulseaudio \
+  tigervnc-standalone-server \
+  code remmina remmina-plugin-rdp remmina-plugin-vnc neofetch kitty flatpak \
+  mesa-vulkan-drivers mesa-vulkan-drivers:i386 \
+  libgl1-mesa-dri libgl1-mesa-dri:i386 \
+  libasound2 libasound2:i386 libpulse0 libpulse0:i386 \
+  libxkbcommon0 libxkbcommon0:i386 >>"$LOG" 2>&1
 
-echo "[3/6] Unpacking initrd..."
-rm -rf "$WORKDIR"
-mkdir -p "$WORKDIR"
-cd "$WORKDIR"
-gzip -dc "$INITRD_PATH" | cpio -idmv
+# 4) Firefox/Steam/ Heroic (Flatpak) -------------------------------------------
+step "4/8 Firefox + Steam (Flatpak --system) & Heroic (user lt4c)"
+flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo >>"$LOG" 2>&1
+flatpak -y --system install flathub org.mozilla.firefox com.valvesoftware.Steam >>"$LOG" 2>&1
+printf '%s\n' '#!/bin/sh' 'exec flatpak run org.mozilla.firefox "$@"' >/usr/local/bin/firefox && chmod +x /usr/local/bin/firefox
+printf '%s\n' '#!/bin/sh' 'exec flatpak run com.valvesoftware.Steam "$@"' >/usr/local/bin/steam && chmod +x /usr/local/bin/steam
+su - "$USER_NAME" -c 'flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo'
+su - "$USER_NAME" -c 'flatpak -y install flathub com.heroicgameslauncher.hgl'
+cat >/etc/profile.d/flatpak-xdg.sh <<'EOF'
+export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/var/lib/flatpak/exports/share:$HOME/.local/share/flatpak/exports/share"
+EOF
+chmod +x /etc/profile.d/flatpak-xdg.sh
 
-echo "[4/6] Injecting bootlocal + tools..."
-mkdir -p "$WORKDIR/srv"
-
-curl -s ifconfig.me > "$WORKDIR/srv/lab"
-echo "/LT4C/LT4C@2025" >> "$WORKDIR/srv/lab"
-
-wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
-chmod +x "$WORKDIR/srv/busybox"
-
-cat > "$WORKDIR/opt/bootlocal.sh" <<'EOF'
+# 5) XRDP config ---------------------------------------------------------------
+step "5/8 Cấu hình XRDP dùng XFCE"
+adduser xrdp ssl-cert >>"$LOG" 2>&1 || true
+su - "$USER_NAME" -c 'echo "startxfce4" > ~/.xsession'
+cat >/etc/xrdp/startwm.sh <<'EOF'
 #!/bin/sh
-set -eu
-
-# === Read kernel cmdline for parameters (with safe defaults) ===
-cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
-BAZZITE_IMG_URL="$(printf '%s' "$cmdline" | sed -n 's/.*BAZZITE_IMG_URL=\([^ ]*\).*/cat > "$WORKDIR/opt/bootlocal.sh" <<'EOF'
-/p')"
-INSTALL_DISK="$(printf '%s' "$cmdline" | sed -n 's/.*INSTALL_DISK=\([^ ]*\).*/cat > "$WORKDIR/opt/bootlocal.sh" <<'EOF'
-/p')"
-: "${BAZZITE_IMG_URL:=https://github.com/ublue-os/bazzite/releases/latest/download/bazzite-gnome-nvidia-x86_64.img.zst}"
-: "${INSTALL_DISK:=/dev/sda}"
-
-# === Network bring-up (retry a bit) ===
-udhcpc -n -q -t 5 || true
-for i in 1 2 3 4 5; do
-  ip -4 route show | grep -q default && break
-  sleep 2
-done
-
-IP_NOW=$(ip -4 -o addr show | awk '/inet/ {print $4}' | paste -sd ' ' -)
-echo "IP: $IP_NOW" >> /srv/lab
-su tc -c "/srv/busybox httpd -p 80 -h /srv"
-
-echo "Starting X + VNC/RDP helper..." >> /srv/lab
-
-# === GUI + tools ===
-su tc -c "tce-load -wi Xorg-7.7 flwm_topside Xlibs Xprogs xsetroot"
-su tc -c "tce-load -wi x11vnc"
-tce-load -wi xrdp
-tce-load -wi openssh.tcz curl zstd
-
-# === Ensure password for tc (for RDP login) ===
-( echo 'tc:lt4c2025' | chpasswd ) 2>/dev/null || {
-  # fallback to passwd if chpasswd missing
-  printf "lt4c2025
-lt4c2025
-" | passwd tc || true
-}
-
-# === Start Xorg desktop ===
-killall Xorg 2>/dev/null || true
-su tc -c "Xorg -nolisten tcp :0 &"
-sleep 3
-su tc -c "DISPLAY=:0 xsetroot -solid '#202020'"
-su tc -c "DISPLAY=:0 flwm_topside &"
-sleep 2
-
-# === Start VNC (password: lt4c2025) ===
-if [ ! -f /home/tc/.vnc/passwd ]; then
-  su tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd 'lt4c2025' /home/tc/.vnc/passwd"
-fi
-su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -shared -rfbauth /home/tc/.vnc/passwd -bg"
-
-# === Start RDP (xrdp + sesman) ===
-killall xrdp-sesman 2>/dev/null || true
-killall xrdp 2>/dev/null || true
-if [ -x /usr/local/sbin/xrdp-sesman ] && [ -x /usr/local/sbin/xrdp ]; then
-  /usr/local/sbin/xrdp-sesman &
-  /usr/local/sbin/xrdp &
-else
-  [ -x /usr/local/etc/init.d/xrdp ] && /usr/local/etc/init.d/xrdp start || true
-  [ -x /usr/local/etc/init.d/xrdp-sesman ] && /usr/local/etc/init.d/xrdp-sesman start || true
-fi
-
-# === Start SSH ===
-/usr/local/etc/init.d/openssh start || true
-
-echo "Remote ready: VNC:5900 / RDP:3389 / SSH:22 (user: tc / pass: lt4c2025)" >> /srv/lab
-
-# Persist VNC password across TinyCore backups
-if ! grep -q '^home/tc/.vnc/passwd$' /opt/.filetool.lst 2>/dev/null; then
-  echo "home/tc/.vnc/passwd" >> /opt/.filetool.lst
-fi
-
-# === Wipe first MBs and stream Bazzite image to INSTALL_DISK ===
-sleep 10
-dd if=/dev/zero of="$INSTALL_DISK" bs=1M count=10 conv=fsync || true
-
-case "$BAZZITE_IMG_URL" in
-  *.img.zst|*.zst)
-    curl -L "$BAZZITE_IMG_URL" | zstd -d -c | dd of="$INSTALL_DISK" bs=4M status=progress conv=fsync ;;
-  *.img.gz|*.gz)
-    curl -L "$BAZZITE_IMG_URL" | gunzip -c | dd of="$INSTALL_DISK" bs=4M status=progress conv=fsync ;;
-  *.img|*.iso)
-    curl -L "$BAZZITE_IMG_URL" | dd of="$INSTALL_DISK" bs=4M status=progress conv=fsync ;;
-  *)
-    echo "Unknown image format: $BAZZITE_IMG_URL" | tee -a /srv/lab; sleep 10; reboot ;;
-esac
-sync
-
-echo "Rebooting in 15s..." | tee -a /srv/lab
-sleep 15
-reboot
-
+export DESKTOP_SESSION=xfce
+export XDG_SESSION_TYPE=x11
+exec startxfce4
 EOF
+chmod +x /etc/xrdp/startwm.sh
+systemctl enable --now xrdp >>"$LOG" 2>&1
 
-chmod +x "$WORKDIR/opt/bootlocal.sh"
+# 6) VNC config ----------------------------------------------------------------
+step "6/8 VNC :0 (5900) – set pass lt4c"
+install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.vnc"
+su - "$USER_NAME" -c "printf '%s' '$VNC_PASS' | vncpasswd -f > ~/.vnc/passwd"
+chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.vnc/passwd"
+chmod 600 "/home/$USER_NAME/.vnc/passwd"
 
-echo "[5/6] Repacking patched initrd..."
-cd "$WORKDIR"
-find . | cpio -o -H newc | gzip -c > "$INITRD_PATCHED"
-
-GRUB_ENTRY="/etc/grub.d/40_custom"
-GRUB_CFG="/etc/default/grub"
-
-
-echo "[6/6] Adding GRUB entry and setting default..."
-# Detect /boot mount characteristics to craft valid GRUB paths
-BOOT_SRC="$(findmnt -no SOURCE /boot 2>/dev/null || true)"
-BOOT_FS="$(findmnt -no FSTYPE /boot 2>/dev/null || true)"
-BOOT_UUID="$(blkid -s UUID -o value "$BOOT_SRC" 2>/dev/null || true)"
-if mountpoint -q /boot && ! mountpoint -q / ; then
-  GRUB_PREFIX="/tinycore"   # separate /boot => path drops leading /boot
-else
-  GRUB_PREFIX="/boot/tinycore"
-fi
-
-# Choose filesystem module (ext2 works for ext2/3/4)
-GRUB_FSMOD="ext2"
-case "$BOOT_FS" in
-  xfs)   GRUB_FSMOD="xfs" ;;
-  btrfs) GRUB_FSMOD="btrfs" ;;
-  ext*)  GRUB_FSMOD="ext2" ;;
-esac
-
-if ! grep -q "🔧 TinyCore Bazzite Helper" "$GRUB_ENTRY" 2>/dev/null; then
-cat <<EOF >> "$GRUB_ENTRY"
-
-menuentry "🔧 TinyCore Bazzite Helper" {
-    insmod part_gpt
-    insmod part_msdos
-    insmod $GRUB_FSMOD
-    search --no-floppy --fs-uuid --set=root $BOOT_UUID || true
-    linux $GRUB_PREFIX/vmlinuz64 console=ttyS0 quiet INSTALL_DISK=$INSTALL_DISK BAZZITE_IMG_URL=$BAZZITE_IMG_URL
-    initrd $GRUB_PREFIX/corepure64-ssh.gz
-}
+cat >"/home/$USER_NAME/.vnc/xstartup" <<'EOF'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+export XDG_SESSION_TYPE=x11
+export DESKTOP_SESSION=xfce
+[ -x /usr/bin/dbus-launch ] && eval $(/usr/bin/dbus-launch --exit-with-session)
+exec startxfce4
 EOF
-fi
+chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.vnc/xstartup"
+chmod +x "/home/$USER_NAME/.vnc/xstartup"
 
-sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="🔧 TinyCore Bazzite Helper"/' "$GRUB_CFG" || echo 'GRUB_DEFAULT="🔧 TinyCore Bazzite Helper"' >> "$GRUB_CFG"
-sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1' >> "$GRUB_CFG"
+cat >/etc/systemd/system/vncserver@.service <<EOF
+[Unit]
+Description=TigerVNC server on display :%i (user ${USER_NAME})
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=${USER_NAME}
+Group=${USER_NAME}
+WorkingDirectory=/home/${USER_NAME}
+Environment=HOME=/home/${USER_NAME}
+ExecStartPre=/usr/bin/bash -lc "/usr/bin/vncserver -kill :%i >/dev/null 2>&1 || true"
+ExecStart=/usr/bin/vncserver -fg -localhost no -geometry ${GEOM} :%i
+ExecStop=/usr/bin/vncserver -kill :%i
+Restart=on-failure
+RestartSec=2
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable vncserver@0.service >>"$LOG" 2>&1
+systemctl restart vncserver@0.service >>"$LOG" 2>&1 || true
 
-update-grub
-echo -e "\n✅ DONE! Reboot to enter TinyCore; SSH:22, VNC:5900, RDP:3389. Bazzite NVIDIA image will be written to /dev/sda and RDP auto-enabled on first boot (via lt4c-2.sh)."
+# 7) Refresh menus -------------------------------------------------------------
+step "7/8 Làm mới menu XFCE"
+update-desktop-database /usr/share/applications || true
+gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+su - "$USER_NAME" -c 'update-desktop-database ~/.local/share/applications || true'
+su - "$USER_NAME" -c 'xdg-desktop-menu forceupdate || true'
+
+# 8) Done ----------------------------------------------------------------------
+step "8/8 Hoàn tất (log: $LOG)"
+IP=$(hostname -I | awk '{print $1}')
+echo "VNC  : ${IP}:5900  (pass: ${VNC_PASS})"
+echo "XRDP : ${IP}:3389  (user ${USER_NAME} / ${USER_PASS})"
