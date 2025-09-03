@@ -1,5 +1,7 @@
+chmod +x lt4c_fixed_ip.sh
+sudo ./lt4c_fixed_ip.sh
 #!/usr/bin/env bash
-# lt4c.sh — XFCE + XRDP + VNC (:0/5900, pass lt4c) + Firefox/Steam (Flatpak)
+# lt4c_fixed_ip.sh — XFCE + XRDP + VNC (:0/5900, pass lt4c) + Firefox/Steam (Flatpak)
 set -Eeuo pipefail
 
 # ======================= CONFIG =======================
@@ -17,7 +19,7 @@ step(){ echo "[BƯỚC] $*"; }
 # =================== INSTALL tmux FIRST ===================
 : >"$LOG"
 apt update -qq >>"$LOG" 2>&1 || true
-apt -y install tmux >>"$LOG" 2>&1 || true
+apt -y install tmux iproute2 >>"$LOG" 2>&1 || true
 
 # =================== INSTALLER ====================
 # 0) Chuẩn bị -------------------------------------------------------
@@ -140,6 +142,27 @@ su - "$USER_NAME" -c 'xdg-desktop-menu forceupdate || true'
 
 # 8) Done ----------------------------------------------------------------------
 step "8/8 Hoàn tất (log: $LOG)"
-IP=$(hostname -I | awk '{print $1}')
+
+# Robust IP detection
+get_ip() {
+  ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
+}
+IP="$(get_ip)"
+if [ -z "$IP" ]; then
+  IP="$(ip -o -4 addr show up scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)"
+fi
+if [ -z "$IP" ] && command -v hostname >/dev/null 2>&1; then
+  IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+fi
+IP="${IP:-<no-ip-detected>}"
+
 echo "VNC  : ${IP}:5900  (pass: ${VNC_PASS})"
 echo "XRDP : ${IP}:3389  (user ${USER_NAME} / ${USER_PASS})"
+
+echo "---- DEBUG ----"
+ip -o -4 addr show up | awk '{print $2, $4}' || true
+ip route || true
+ss -ltnp | awk 'NR==1 || /:3389|:5900/' || true
+systemctl --no-pager --full status xrdp | sed -n '1,20p' || true
+systemctl --no-pager --full status vncserver@0 | sed -n '1,20p' || true
+echo "--------------"
