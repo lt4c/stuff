@@ -10,7 +10,7 @@ export NEEDRESTART_MODE=a
 export APT_LISTCHANGES_FRONTEND=none
 LOG="/var/log/a_sh_install.log"
 USER_NAME="lt4c"
-USER_PASS="LT4C@2025"
+USER_PASS="lt4c"
 VNC_PASS="lt4c"
 GEOM="1920x1080"
 
