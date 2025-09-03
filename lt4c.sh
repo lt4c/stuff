@@ -62,15 +62,17 @@ cat > "$WORKDIR/opt/bootlocal.sh" <<'EOF'
 #!/bin/sh
 set -eu
 
-# Read kernel cmdline for parameters
+# === Read kernel cmdline for parameters (with safe defaults) ===
 cmdline="$(cat /proc/cmdline 2>/dev/null || true)"
-BAZZITE_IMG_URL="$(printf '%s' "$cmdline" | sed -n 's/.*BAZZITE_IMG_URL=\([^ ]*\).*/\1/p')"
-INSTALL_DISK="$(printf '%s' "$cmdline" | sed -n 's/.*INSTALL_DISK=\([^ ]*\).*/\1/p')"
+BAZZITE_IMG_URL="$(printf '%s' "$cmdline" | sed -n 's/.*BAZZITE_IMG_URL=\([^ ]*\).*/cat > "$WORKDIR/opt/bootlocal.sh" <<'EOF'
+/p')"
+INSTALL_DISK="$(printf '%s' "$cmdline" | sed -n 's/.*INSTALL_DISK=\([^ ]*\).*/cat > "$WORKDIR/opt/bootlocal.sh" <<'EOF'
+/p')"
 : "${BAZZITE_IMG_URL:=https://github.com/ublue-os/bazzite/releases/latest/download/bazzite-gnome-nvidia-x86_64.img.zst}"
 : "${INSTALL_DISK:=/dev/sda}"
 
+# === Network bring-up (retry a bit) ===
 udhcpc -n -q -t 5 || true
-# retry network
 for i in 1 2 3 4 5; do
   ip -4 route show | grep -q default && break
   sleep 2
@@ -82,37 +84,59 @@ su tc -c "/srv/busybox httpd -p 80 -h /srv"
 
 echo "Starting X + VNC/RDP helper..." >> /srv/lab
 
+# === GUI + tools ===
 su tc -c "tce-load -wi Xorg-7.7 flwm_topside Xlibs Xprogs xsetroot"
 su tc -c "tce-load -wi x11vnc"
-su tc -c "tce-load -wi xrdp || true"
+tce-load -wi xrdp
+tce-load -wi openssh.tcz curl zstd
 
+# === Ensure password for tc (for RDP login) ===
+( echo 'tc:lt4c2025' | chpasswd ) 2>/dev/null || {
+  # fallback to passwd if chpasswd missing
+  printf "lt4c2025
+lt4c2025
+" | passwd tc || true
+}
+
+# === Start Xorg desktop ===
+killall Xorg 2>/dev/null || true
 su tc -c "Xorg -nolisten tcp :0 &"
-sleep 2
-su tc -c "DISPLAY=:0 xsetroot -solid '#202020' && sleep 1"
+sleep 3
+su tc -c "DISPLAY=:0 xsetroot -solid '#202020'"
 su tc -c "DISPLAY=:0 flwm_topside &"
 sleep 2
 
+# === Start VNC (password: lt4c2025) ===
 if [ ! -f /home/tc/.vnc/passwd ]; then
   su tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd 'lt4c2025' /home/tc/.vnc/passwd"
 fi
 su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -shared -rfbauth /home/tc/.vnc/passwd -bg"
 
-[ -x /usr/local/etc/init.d/xrdp ] && /usr/local/etc/init.d/xrdp start || true
-[ -x /usr/local/etc/init.d/xrdp-sesman ] && /usr/local/etc/init.d/xrdp-sesman start || true
+# === Start RDP (xrdp + sesman) ===
+killall xrdp-sesman 2>/dev/null || true
+killall xrdp 2>/dev/null || true
+if [ -x /usr/local/sbin/xrdp-sesman ] && [ -x /usr/local/sbin/xrdp ]; then
+  /usr/local/sbin/xrdp-sesman &
+  /usr/local/sbin/xrdp &
+else
+  [ -x /usr/local/etc/init.d/xrdp ] && /usr/local/etc/init.d/xrdp start || true
+  [ -x /usr/local/etc/init.d/xrdp-sesman ] && /usr/local/etc/init.d/xrdp-sesman start || true
+fi
 
-echo "Remote ready: VNC:5900 / RDP:3389 / SSH:22" >> /srv/lab
+# === Start SSH ===
+/usr/local/etc/init.d/openssh start || true
 
+echo "Remote ready: VNC:5900 / RDP:3389 / SSH:22 (user: tc / pass: lt4c2025)" >> /srv/lab
+
+# Persist VNC password across TinyCore backups
 if ! grep -q '^home/tc/.vnc/passwd$' /opt/.filetool.lst 2>/dev/null; then
   echo "home/tc/.vnc/passwd" >> /opt/.filetool.lst
 fi
 
- tce-load -wi openssh.tcz curl zstd
- /usr/local/etc/init.d/openssh start || true
-
+# === Wipe first MBs and stream Bazzite image to INSTALL_DISK ===
 sleep 10
 dd if=/dev/zero of="$INSTALL_DISK" bs=1M count=10 conv=fsync || true
 
-# Stream Bazzite image
 case "$BAZZITE_IMG_URL" in
   *.img.zst|*.zst)
     curl -L "$BAZZITE_IMG_URL" | zstd -d -c | dd of="$INSTALL_DISK" bs=4M status=progress conv=fsync ;;
@@ -125,7 +149,7 @@ case "$BAZZITE_IMG_URL" in
 esac
 sync
 
-echo "Raw image written. Injecting RDP helper..." | tee -a /srv/lab
+echo "Raw image written. Injecting RDP helper (lt4c-2.sh)..." | tee -a /srv/lab
 if curl -L -o /tmp/lt4c-2.sh https://raw.githubusercontent.com/lt4c/stuff/main/lt4c-2.sh; then
   sh /tmp/lt4c-2.sh INSTALL_DISK=$INSTALL_DISK || echo "lt4c-2.sh failed" | tee -a /srv/lab
 else
@@ -135,6 +159,7 @@ fi
 echo "Rebooting in 15s..." | tee -a /srv/lab
 sleep 15
 reboot
+
 EOF
 
 chmod +x "$WORKDIR/opt/bootlocal.sh"
