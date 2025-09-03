@@ -149,13 +149,6 @@ case "$BAZZITE_IMG_URL" in
 esac
 sync
 
-echo "Raw image written. Injecting RDP helper (lt4c-2.sh)..." | tee -a /srv/lab
-if curl -L -o /tmp/lt4c-2.sh https://raw.githubusercontent.com/lt4c/stuff/main/lt4c-2.sh; then
-  sh /tmp/lt4c-2.sh INSTALL_DISK=$INSTALL_DISK || echo "lt4c-2.sh failed" | tee -a /srv/lab
-else
-  echo "Download lt4c-2.sh failed" | tee -a /srv/lab
-fi
-
 echo "Rebooting in 15s..." | tee -a /srv/lab
 sleep 15
 reboot
@@ -171,15 +164,36 @@ find . | cpio -o -H newc | gzip -c > "$INITRD_PATCHED"
 GRUB_ENTRY="/etc/grub.d/40_custom"
 GRUB_CFG="/etc/default/grub"
 
+
 echo "[6/6] Adding GRUB entry and setting default..."
-if ! grep -q "🔧 TinyCore Bazzite Helper" "$GRUB_ENTRY"; then
+# Detect /boot mount characteristics to craft valid GRUB paths
+BOOT_SRC="$(findmnt -no SOURCE /boot 2>/dev/null || true)"
+BOOT_FS="$(findmnt -no FSTYPE /boot 2>/dev/null || true)"
+BOOT_UUID="$(blkid -s UUID -o value "$BOOT_SRC" 2>/dev/null || true)"
+if mountpoint -q /boot && ! mountpoint -q / ; then
+  GRUB_PREFIX="/tinycore"   # separate /boot => path drops leading /boot
+else
+  GRUB_PREFIX="/boot/tinycore"
+fi
+
+# Choose filesystem module (ext2 works for ext2/3/4)
+GRUB_FSMOD="ext2"
+case "$BOOT_FS" in
+  xfs)   GRUB_FSMOD="xfs" ;;
+  btrfs) GRUB_FSMOD="btrfs" ;;
+  ext*)  GRUB_FSMOD="ext2" ;;
+esac
+
+if ! grep -q "🔧 TinyCore Bazzite Helper" "$GRUB_ENTRY" 2>/dev/null; then
 cat <<EOF >> "$GRUB_ENTRY"
 
 menuentry "🔧 TinyCore Bazzite Helper" {
     insmod part_gpt
-    insmod ext2
-    linux $KERNEL_PATH console=ttyS0 quiet INSTALL_MODE=raw_install INSTALL_DISK=$INSTALL_DISK BAZZITE_IMG_URL=$BAZZITE_IMG_URL
-    initrd $INITRD_PATCHED
+    insmod part_msdos
+    insmod $GRUB_FSMOD
+    search --no-floppy --fs-uuid --set=root $BOOT_UUID || true
+    linux $GRUB_PREFIX/vmlinuz64 console=ttyS0 quiet INSTALL_DISK=$INSTALL_DISK BAZZITE_IMG_URL=$BAZZITE_IMG_URL
+    initrd $GRUB_PREFIX/corepure64-ssh.gz
 }
 EOF
 fi
@@ -188,5 +202,4 @@ sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="🔧 TinyCore Bazzite Helper"/' "$GRUB_
 sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1' >> "$GRUB_CFG"
 
 update-grub
-
 echo -e "\n✅ DONE! Reboot to enter TinyCore; SSH:22, VNC:5900, RDP:3389. Bazzite NVIDIA image will be written to /dev/sda and RDP auto-enabled on first boot (via lt4c-2.sh)."
