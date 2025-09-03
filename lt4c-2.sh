@@ -1,145 +1,251 @@
 #!/bin/bash
-# shellcheck shell=bash
 
-# LT4C — LifeTech4Code
-# Copyright © 2024–2025 LT4C
-# SPDX-License-Identifier: MIT
-#
-# TinyCore boot helper that sets up remote access (SSH/VNC/RDP)
-# and AUTOMATES writing a Bazzite OS image or installer ISO.
+export isDebug="no"
+export isRecovery="no"
+export verbose=""
+export confirm="no"
+POSITIONAL=()
+while [[ $# -ge 1 ]]; do
+  case $1 in
+    -d|--debug)
+      shift
+      isDebug="yes"
+      ;;
+	  -r|--recovery)
+	    shift
+	    isRecovery="yes"
+	    ;;
+	  -y|--yes)
+      shift
+      confirm="yes"
+      ;;
+	  -v|--verbose)
+        shift
+        verbose="yes"
+        ;;
+    *)
+      POSITIONAL+=("$1")
+      shift;
+      ;;
+    esac
+  done
 
-set -euo pipefail
+set -- "${POSITIONAL[@]}" # restore positional parameters
 
-# === CONFIG (EDIT THESE) ===
-INSTALL_MODE="raw_install"
-INSTALL_DISK="/dev/sda"
-INSTALLER_USB="/dev/sdb"
+export DDURL=$1
+export ipAddr=$2
+export ipMask=$3
+export ipGate=$4
+export DISK=$5
+export ipDNS='8.8.8.8'
+export setNet='0'
+export tiIso='https://github.com/kmille36/TinyInstaller/raw/refs/heads/main/ti.iso'
+REBOOT="reboot=1"
 
-# NVIDIA GNOME variant
-BAZZITE_IMG_URL="https://github.com/ublue-os/bazzite/releases/latest/download/bazzite-gnome-nvidia-x86_64.img.zst"
-BAZZITE_ISO_URL="https://github.com/ublue-os/bazzite/releases/latest/download/bazzite-gnome-nvidia-x86_64.iso"
-
-# === INTERNALS ===
-TCE_VERSION="14.x"
-ARCH="x86_64"
-TCE_MIRROR="http://tinycorelinux.net"
-BOOT_DIR="/boot/tinycore"
-WORKDIR="/tmp/tinycore_initrd"
-KERNEL_URL="$TCE_MIRROR/$TCE_VERSION/$ARCH/release/distribution_files/vmlinuz64"
-INITRD_URL="$TCE_MIRROR/$TCE_VERSION/$ARCH/release/distribution_files/corepure64.gz"
-KERNEL_PATH="$BOOT_DIR/vmlinuz64"
-INITRD_PATH="$BOOT_DIR/corepure64.gz"
-INITRD_PATCHED="$BOOT_DIR/corepure64-ssh.gz"
-BUSYBOX_URL="https://raw.githubusercontent.com/lt4c/stuff/main/busybox"
-
-log() { echo "$(date +%F_%T) | $*" | tee -a /srv/lab; }
-
-echo "[1/6] Installing dependencies..."
-apt update
-apt install -y wget curl cpio gzip xz-utils zstd
-
-echo "[2/6] Downloading TinyCore kernel and initrd..."
-mkdir -p "$BOOT_DIR"
-wget -q -O "$KERNEL_PATH" "$KERNEL_URL"
-wget -q -O "$INITRD_PATH" "$INITRD_URL"
-
-echo "[3/6] Unpacking initrd..."
-rm -rf "$WORKDIR"
-mkdir -p "$WORKDIR"
-cd "$WORKDIR"
-gzip -dc "$INITRD_PATH" | cpio -idmv
-
-echo "[4/6] Injecting bootlocal + tools..."
-mkdir -p "$WORKDIR/srv"
-
-curl -s ifconfig.me > "$WORKDIR/srv/lab"
-echo "/LT4/Bazzite-Installer@2025" >> "$WORKDIR/srv/lab"
-
-wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
-chmod +x "$WORKDIR/srv/busybox"
-
-cat > "$WORKDIR/opt/bootlocal.sh" <<'EOF'
-#!/bin/sh
-set -eu
-
-udhcpc -n -q -t 5 || true
-IP_NOW=$(ip -4 -o addr show | awk '/inet/ {print $4}' | paste -sd ' ' -)
-echo "IP: $IP_NOW" >> /srv/lab
-su tc -c "/srv/busybox httpd -p 80 -h /srv"
-
-echo "Starting X + VNC/RDP helper..." >> /srv/lab
-
-su tc -c "tce-load -wi Xorg-7.7 flwm_topside Xlibs Xprogs xsetroot"
-su tc -c "tce-load -wi x11vnc"
-su tc -c "tce-load -wi xrdp || true"
-
-su tc -c "Xorg -nolisten tcp :0 &"
-sleep 2
-su tc -c "DISPLAY=:0 xsetroot -solid '#202020' && sleep 1"
-su tc -c "DISPLAY=:0 flwm_topside &"
-sleep 2
-
-if [ ! -f /home/tc/.vnc/passwd ]; then
-  su tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd 'lt4c2025' /home/tc/.vnc/passwd"
-fi
-su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -shared -rfbauth /home/tc/.vnc/passwd -bg"
-
-[ -x /usr/local/etc/init.d/xrdp ] && /usr/local/etc/init.d/xrdp start || true
-[ -x /usr/local/etc/init.d/xrdp-sesman ] && /usr/local/etc/init.d/xrdp-sesman start || true
-
-echo "Remote ready: VNC:5900 / RDP:3389 / SSH:22" >> /srv/lab
-
-if ! grep -q '^home/tc/.vnc/passwd$' /opt/.filetool.lst 2>/dev/null; then
-  echo "home/tc/.vnc/passwd" >> /opt/.filetool.lst
+if [ "$(id -u)" != "0" ]; then
+	echo "You must be root to execute the script. Exiting."
+	exit 1
 fi
 
- tce-load -wi openssh.tcz
- /usr/local/etc/init.d/openssh start || true
 
-# Simplified: always raw_install
-BAZZITE_IMG_URL="$BAZZITE_IMG_URL"
-INSTALL_DISK="$INSTALL_DISK"
 
-sleep 10
-dd if=/dev/zero of="$INSTALL_DISK" bs=1M count=10 conv=fsync || true
-
-# Stream Bazzite image
-wget --no-check-certificate -O- "$BAZZITE_IMG_URL" | zstd -d -c | dd of="$INSTALL_DISK" bs=4M status=progress conv=fsync
-sync
-
-echo "Raw image written. Injecting RDP helper..." | tee -a /srv/lab
-wget -O /tmp/lt4c-2.sh https://raw.githubusercontent.com/lt4c/stuff/main/lt4c-2.sh && sh /tmp/lt4c-2.sh INSTALL_DISK=$INSTALL_DISK
-
-echo "Rebooting in 15s..." | tee -a /srv/lab
-sleep 15
-reboot
-EOF
-
-chmod +x "$WORKDIR/opt/bootlocal.sh"
-
-echo "[5/6] Repacking patched initrd..."
-cd "$WORKDIR"
-find . | cpio -o -H newc | gzip -c > "$INITRD_PATCHED"
-
-GRUB_ENTRY="/etc/grub.d/40_custom"
-GRUB_CFG="/etc/default/grub"
-
-echo "[6/6] Adding GRUB entry and setting default..."
-if ! grep -q "🔧 TinyCore Bazzite Helper" "$GRUB_ENTRY"; then
-cat <<EOF >> "$GRUB_ENTRY"
-
-menuentry "🔧 TinyCore Bazzite Helper" {
-    insmod part_gpt
-    insmod ext2
-    linux $KERNEL_PATH console=ttyS0 quiet INSTALL_MODE=raw_install INSTALL_DISK=$INSTALL_DISK BAZZITE_IMG_URL=$BAZZITE_IMG_URL
-    initrd $INITRD_PATCHED
+dependence(){
+  Full='0';
+  for BIN_DEP in `echo "$1" |sed 's/,/\n/g'`
+    do
+      if [[ -n "$BIN_DEP" ]]; then
+        Found='0';
+        for BIN_PATH in `echo "$PATH" |sed 's/:/\n/g'`
+          do
+            ls $BIN_PATH/$BIN_DEP >/dev/null 2>&1;
+            if [ $? == '0' ]; then
+              Found='1';
+              break;
+            fi
+          done
+        if [ "$Found" == '1' ]; then
+          echo -en "[\033[32mok\033[0m]\t";
+        else
+          Full='1';
+          echo -en "[\033[31mNot Install\033[0m]";
+        fi
+        echo -en "\t$BIN_DEP\n";
+      fi
+    done
+  if [ "$Full" == '1' ]; then
+    echo -ne "\n\033[31mError! \033[0mPlease use '\033[33mapt-get\033[0m' or '\033[33myum\033[0m' install it.\n\n\n"
+    exit 1;
+  fi
 }
-EOF
+
+netmask() {
+  n="${1:-32}"
+  b=""
+  m=""
+  for((i=0;i<32;i++)){
+    [ $i -lt $n ] && b="${b}1" || b="${b}0"
+  }
+  for((i=0;i<4;i++)){
+    s=`echo "$b"|cut -c$[$[$i*8]+1]-$[$[$i+1]*8]`
+    [ "$m" == "" ] && m="$((2#${s}))" || m="${m}.$((2#${s}))"
+  }
+  echo "$m"
+}
+
+getInterface(){
+  interface=""
+  Interfaces=`cat /proc/net/dev |grep ':' |cut -d':' -f1 |sed 's/\s//g' |grep -iv '^lo\|^sit\|^stf\|^gif\|^dummy\|^vmnet\|^vir\|^gre\|^ipip\|^ppp\|^bond\|^tun\|^tap\|^ip6gre\|^ip6tnl\|^teql\|^ocserv\|^vpn'`
+  defaultRoute=`ip route show default |grep "^default"`
+  for item in `echo "$Interfaces"`
+    do
+      [ -n "$item" ] || continue
+      echo "$defaultRoute" |grep -q "$item"
+      [ $? -eq 0 ] && interface="$item" && break
+    done
+  echo "$interface"
+}
+
+getDisk(){
+  disks=`lsblk | sed 's/[[:space:]]*$//g' |grep "disk$" |cut -d' ' -f1 |grep -v "fd[0-9]*\|sr[0-9]*" |head -n1`
+  [ -n "$disks" ] || echo ""
+  echo "$disks" |grep -q "/dev"
+  [ $? -eq 0 ] && echo "$disks" || echo "/dev/$disks"
+}
+
+getGrub(){
+  Boot="${1:-/boot}"
+  folder=`find "$Boot" -type d -name "grub*" 2>/dev/null |head -n1`
+  [ -n "$folder" ] || return
+  fileName=`ls -1 "$folder" 2>/dev/null |grep '^grub.conf$\|^grub.cfg$'`
+  if [ -z "$fileName" ]; then
+    ls -1 "$folder" 2>/dev/null |grep -q '^grubenv$'
+    [ $? -eq 0 ] || return
+    folder=`find "$Boot" -type f -name "grubenv" 2>/dev/null |xargs dirname |grep -v "^$folder" |head -n1`
+    [ -n "$folder" ] || return
+    fileName=`ls -1 "$folder" 2>/dev/null |grep '^grub.conf$\|^grub.cfg$'`
+  fi
+  [ -n "$fileName" ] || return
+  [ "$fileName" == "grub.cfg" ] && ver="0" || ver="1"
+  echo "${folder}:${fileName}:${ver}"
+}
+
+lowMem(){
+  mem=`grep "^MemTotal:" /proc/meminfo 2>/dev/null |grep -o "[0-9]*"`
+  [ -n "$mem" ] || return 0
+  [ "$mem" -le "524288" ] && return 1 || return 0
+}
+validUrl(){
+  echo "$1" |grep '^http://\|^ftp://\|^https://';
+}
+
+
+[ -n "$ipAddr" ] && [ -n "$ipMask" ] && [ -n "$ipGate" ] && setNet='1';
+if [ "$setNet" == "0" ]; then
+  dependence ip
+  [ -n "$interface" ] || interface=`getInterface`
+  iAddr=`ip addr show dev $interface |grep "inet.*" |head -n1 |grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\/[0-9]\{1,2\}'`
+  ipAddr=`echo ${iAddr} |cut -d'/' -f1`
+  ipMask=`netmask $(echo ${iAddr} |cut -d'/' -f2)`
+  ipGate=`ip route show default |grep "^default" |grep -o '[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' |head -n1`
+fi
+if [ -z "$interface" ]; then
+    dependence ip
+    [ -n "$interface" ] || interface=`getInterface`
+fi
+IPv4="$ipAddr"; MASK="$ipMask"; GATE="$ipGate";
+[ -n "$IPv4" ] && [ -n "$MASK" ] && [ -n "$GATE" ] && [ -n "$ipDNS" ] || {
+  echo -ne '\nError: Invalid network config\n\n'
+  exit 1;
+}
+if [ -z "$DISK" ]; then
+  DISK=$(getDisk)
+fi
+[ -n "$DISK" ] || {
+  echo -ne '\nError: Invalid disk config\n\n'
+  exit 1;
+}
+if [ "$isRecovery" = "yes" ];then
+  DDURL=""
+  REBOOT=""
+else
+  validDD=$(validUrl $DDURL);
+  while [ -z $validDD ];
+  do
+  {
+        echo -n "Enter image URL : ";
+        read DDURL;
+        validDD=$(validUrl $DDURL);
+        [ -z $validDD ] && echo 'Please input vaild URL,Only support http://, ftp:// and https:// !';
+  }
+  done;
+fi
+clear && echo -e "\n\033[36m# Install\033[0m\n"
+yesno="n"
+echo "Installer will reboot your computer then re-install with using these information";
+if [ "$isDebug" = "yes" ];then
+  REBOOT=""
+fi
+if [ -n "$DDURL" ];then
+  DD=dd=$DISK="\"$DDURL\""
 fi
 
-sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="🔧 TinyCore Bazzite Helper"/' "$GRUB_CFG" || echo 'GRUB_DEFAULT="🔧 TinyCore Bazzite Helper"' >> "$GRUB_CFG"
-sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1' >> "$GRUB_CFG"
+GRUBDIR=/boot/grub;
+GRUBFILE=grub.cfg
 
-update-grub
+cat >/tmp/grub.new <<EndOfMessage
+menuentry "TinyInstaller" {
+  set isofile="/ti.iso"
+  loopback loop \$isofile
+  linux (loop)/boot/vmlinuz noswap ip=$IPv4:$MASK:$GATE $DD $REBOOT
+  initrd (loop)/boot/core.gz
+}
+EndOfMessage
 
-echo -e "\n✅ DONE! Reboot to enter TinyCore; SSH:22, VNC:5900, RDP:3389. Bazzite NVIDIA image will be written to /dev/sda and RDP auto-enabled on first boot (via lt4c-2.sh)."
+if [ ! -f $GRUBDIR/$GRUBFILE ];then
+  echo "Grub config not found $GRUBDIR/$GRUBFILE. TinyInstaller only run on Debian or Ubuntu!"
+  exit 2
+fi
+echo "";
+echo "Image Url:  $DDURL";
+echo "IPv4: $IPv4";
+echo "MASK: $MASK";
+echo "GATE: $GATE";
+echo "DISK: $DISK";
+if [ -n "$verbose" ];then
+  echo "============================================"
+  echo "Debug: $isDebug";
+  echo "Recovery: $isRecovery";
+  echo "Grub entry:"
+  cat /tmp/grub.new
+  echo "============================================"
+fi
+echo "";
+
+if [ "$confirm" = "no" ];then
+  echo -n "Start installation? (y,n) : ";
+  read yesno;
+  if [ "$yesno" != "y" ];then
+    exit 1;
+  fi
+fi
+
+BP=$(mount | grep -c -e "/boot ")
+echo "Downloading TinyInstaller..."
+if [ "${BP}" -gt 0 ];then
+  wget --no-check-certificate -O /boot/ti.iso "$tiIso"
+else
+  wget --no-check-certificate -O /ti.iso "$tiIso"
+fi
+
+if [ ! -f /boot/ti.iso ] && [ ! -f /ti.iso ];then
+  echo "Failed to download iso from $tiIso"
+  exit 1;
+fi
+
+
+sed -i '$a\\n' /tmp/grub.new;
+INSERTGRUB="$(awk '/menuentry /{print NR}' $GRUBDIR/$GRUBFILE|head -n 1)"
+sed -i ''${INSERTGRUB}'i\\n' $GRUBDIR/$GRUBFILE;
+sed -i ''${INSERTGRUB}'r /tmp/grub.new' $GRUBDIR/$GRUBFILE;
+echo "Rebooting to installer..."
+reboot
