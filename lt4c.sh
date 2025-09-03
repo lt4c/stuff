@@ -1,7 +1,5 @@
-chmod +x lt4c_fixed_ip.sh
-sudo ./lt4c_fixed_ip.sh
 #!/usr/bin/env bash
-# lt4c_fixed_ip.sh — XFCE + XRDP + VNC (:0/5900, pass lt4c) + Firefox/Steam (Flatpak)
+# lt4c_fixed_ip_steam_prewarm.sh — XFCE + XRDP + VNC (:0/5900, pass lt4c) + Firefox/Steam (Flatpak) + Steam prewarm
 set -Eeuo pipefail
 
 # ======================= CONFIG =======================
@@ -23,7 +21,7 @@ apt -y install tmux iproute2 >>"$LOG" 2>&1 || true
 
 # =================== INSTALLER ====================
 # 0) Chuẩn bị -------------------------------------------------------
-step "0/8 Chuẩn bị"
+step "0/9 Chuẩn bị"
 mkdir -p /etc/needrestart/conf.d
 echo '$nrconf{restart} = "a";' >/etc/needrestart/conf.d/zzz-auto.conf || true
 apt -y purge needrestart >>"$LOG" 2>&1 || true
@@ -35,7 +33,7 @@ apt -y -o Dpkg::Use-Pty=0 install \
   sudo dbus-x11 xdg-utils desktop-file-utils >>"$LOG" 2>&1
 
 # 1) User ----------------------------------------------------------------------
-step "1/8 Tạo user ${USER_NAME}"
+step "1/9 Tạo user ${USER_NAME}"
 if ! id -u "$USER_NAME" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "LT4C" "$USER_NAME" >>"$LOG" 2>&1
   echo "${USER_NAME}:${USER_PASS}" | chpasswd
@@ -43,7 +41,7 @@ if ! id -u "$USER_NAME" >/dev/null 2>&1; then
 fi
 
 # 2) VS Code repo + i386 + multiverse -----------------------------------------
-step "2/8 VSCode repo + i386 (Proton) + multiverse"
+step "2/9 VSCode repo + i386 (Proton) + multiverse"
 install -d -m 0755 /etc/apt/keyrings
 curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
 chmod a+r /etc/apt/keyrings/microsoft.gpg
@@ -54,7 +52,7 @@ dpkg --add-architecture i386 >>"$LOG" 2>&1 || true
 apt update -qq >>"$LOG" 2>&1
 
 # 3) One-shot APT install ------------------------------------------------------
-step "3/8 Cài XFCE + XRDP + VNC + App"
+step "3/9 Cài XFCE + XRDP + VNC + App"
 apt -y install \
   xfce4 xfce4-goodies xorg \
   xrdp xorgxrdp pulseaudio \
@@ -66,7 +64,7 @@ apt -y install \
   libxkbcommon0 libxkbcommon0:i386 >>"$LOG" 2>&1
 
 # 4) Firefox/Steam/ Heroic (Flatpak) -------------------------------------------
-step "4/8 Firefox + Steam (Flatpak --system) & Heroic (user lt4c)"
+step "4/9 Firefox + Steam (Flatpak --system) & Heroic (user lt4c)"
 flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo >>"$LOG" 2>&1
 flatpak -y --system install flathub org.mozilla.firefox com.valvesoftware.Steam >>"$LOG" 2>&1
 printf '%s\n' '#!/bin/sh' 'exec flatpak run org.mozilla.firefox "$@"' >/usr/local/bin/firefox && chmod +x /usr/local/bin/firefox
@@ -79,7 +77,7 @@ EOF
 chmod +x /etc/profile.d/flatpak-xdg.sh
 
 # 5) XRDP config ---------------------------------------------------------------
-step "5/8 Cấu hình XRDP dùng XFCE"
+step "5/9 Cấu hình XRDP dùng XFCE"
 adduser xrdp ssl-cert >>"$LOG" 2>&1 || true
 su - "$USER_NAME" -c 'echo "startxfce4" > ~/.xsession'
 cat >/etc/xrdp/startwm.sh <<'EOF'
@@ -92,7 +90,7 @@ chmod +x /etc/xrdp/startwm.sh
 systemctl enable --now xrdp >>"$LOG" 2>&1
 
 # 6) VNC config ----------------------------------------------------------------
-step "6/8 VNC :0 (5900) – set pass lt4c"
+step "6/9 VNC :0 (5900) – set pass lt4c"
 install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.vnc"
 su - "$USER_NAME" -c "printf '%s' '$VNC_PASS' | vncpasswd -f > ~/.vnc/passwd"
 chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.vnc/passwd"
@@ -133,15 +131,20 @@ systemctl daemon-reload
 systemctl enable vncserver@0.service >>"$LOG" 2>&1
 systemctl restart vncserver@0.service >>"$LOG" 2>&1 || true
 
-# 7) Refresh menus -------------------------------------------------------------
-step "7/8 Làm mới menu XFCE"
+# 7) Steam prewarm (headless) --------------------------------------------------
+step "7/9 Steam prewarm (headless)"
+apt -y install xvfb >>"$LOG" 2>&1 || true
+su - "$USER_NAME" -c 'xvfb-run -a flatpak run com.valvesoftware.Steam -silent || true'
+
+# 8) Refresh menus -------------------------------------------------------------
+step "8/9 Làm mới menu XFCE"
 update-desktop-database /usr/share/applications || true
 gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 su - "$USER_NAME" -c 'update-desktop-database ~/.local/share/applications || true'
 su - "$USER_NAME" -c 'xdg-desktop-menu forceupdate || true'
 
-# 8) Done ----------------------------------------------------------------------
-step "8/8 Hoàn tất (log: $LOG)"
+# 9) Done ----------------------------------------------------------------------
+step "9/9 Hoàn tất (log: $LOG)"
 
 # Robust IP detection
 get_ip() {
