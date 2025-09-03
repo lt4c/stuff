@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
-# lt4c_xfce_steam_shortcut_optimized.sh
-# XFCE + XRDP + VNC (:0/5900, pass lt4c) + Firefox/Steam (Flatpak)
-# Steam prewarm (no sleep) + XFCE menu shortcut + XRDP performance tuned
+# lt4c_ultrasmooth.sh — Focus on smooth remote desktop (XRDP tuned + x11vnc + XFCE no-compositor)
 set -Eeuo pipefail
 
-# ======================= CONFIG =======================
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
 export APT_LISTCHANGES_FRONTEND=none
@@ -12,74 +9,57 @@ LOG="/var/log/a_sh_install.log"
 USER_NAME="lt4c"
 USER_PASS="lt4c"
 VNC_PASS="lt4c"
-GEOM="1920x1080"
+GEOM="1280x720"
+VNC_PORT="5900"
 
 step(){ echo "[BƯỚC] $*"; }
 
-# =================== INSTALL tmux FIRST ===================
 : >"$LOG"
 apt update -qq >>"$LOG" 2>&1 || true
 apt -y install tmux iproute2 >>"$LOG" 2>&1 || true
 
-# =================== INSTALLER ====================
-# 0) Chuẩn bị -------------------------------------------------------
-step "0/11 Chuẩn bị"
+# 0) Base tools
+step "0/10 Chuẩn bị môi trường"
 mkdir -p /etc/needrestart/conf.d
 echo '$nrconf{restart} = "a";' >/etc/needrestart/conf.d/zzz-auto.conf || true
 apt -y purge needrestart >>"$LOG" 2>&1 || true
 systemctl stop unattended-upgrades >>"$LOG" 2>&1 || true
 systemctl disable unattended-upgrades >>"$LOG" 2>&1 || true
-
 apt -y -o Dpkg::Use-Pty=0 install \
   curl wget ca-certificates gnupg lsb-release apt-transport-https software-properties-common \
   sudo dbus-x11 xdg-utils desktop-file-utils >>"$LOG" 2>&1
 
-# 1) User ----------------------------------------------------------------------
-step "1/11 Tạo user ${USER_NAME}"
+# 1) User
+step "1/10 Tạo user ${USER_NAME}"
 if ! id -u "$USER_NAME" >/dev/null 2>&1; then
   adduser --disabled-password --gecos "LT4C" "$USER_NAME" >>"$LOG" 2>&1
   echo "${USER_NAME}:${USER_PASS}" | chpasswd
   usermod -aG sudo "$USER_NAME"
 fi
 
-# 2) VS Code repo + i386 + multiverse -----------------------------------------
-step "2/11 VSCode repo + i386 (Proton) + multiverse"
-install -d -m 0755 /etc/apt/keyrings
-curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /etc/apt/keyrings/microsoft.gpg
-chmod a+r /etc/apt/keyrings/microsoft.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
-  >/etc/apt/sources.list.d/vscode.list
-add-apt-repository -y multiverse >>"$LOG" 2>&1 || true
-dpkg --add-architecture i386 >>"$LOG" 2>&1 || true
-apt update -qq >>"$LOG" 2>&1
-
-# 3) One-shot APT install ------------------------------------------------------
-step "3/11 Cài XFCE + XRDP + VNC + App"
+# 2) Desktop + tools
+step "2/10 Cài XFCE + XRDP + công cụ cần thiết"
 apt -y install \
   xfce4 xfce4-goodies xorg \
   xrdp xorgxrdp pulseaudio \
-  tigervnc-standalone-server \
   code remmina remmina-plugin-rdp remmina-plugin-vnc neofetch kitty flatpak \
-  mesa-vulkan-drivers mesa-vulkan-drivers:i386 \
-  libgl1-mesa-dri libgl1-mesa-dri:i386 \
-  libasound2 libasound2:i386 libpulse0 libpulse0:i386 \
-  libxkbcommon0 libxkbcommon0:i386 >>"$LOG" 2>&1
+  mesa-vulkan-drivers libgl1-mesa-dri libasound2 libpulse0 libxkbcommon0 >>"$LOG" 2>&1
 
-# 4) Firefox/Steam/ Heroic (Flatpak) -------------------------------------------
-step "4/11 Firefox + Steam (Flatpak --system) & Heroic (user lt4c)"
-flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo >>"$LOG" 2>&1
-flatpak -y --system install flathub org.mozilla.firefox com.valvesoftware.Steam >>"$LOG" 2>&1
+# 3) Steam Flatpak (giữ như trước), Firefox, Heroic
+step "3/10 Firefox + Steam (Flatpak) & Heroic"
+flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo >>"$LOG" 2>&1 || true
+flatpak -y --system install flathub org.mozilla.firefox com.valvesoftware.Steam >>"$LOG" 2>&1 || true
 printf '%s\n' '#!/bin/sh' 'exec flatpak run org.mozilla.firefox "$@"' >/usr/local/bin/firefox && chmod +x /usr/local/bin/firefox
 printf '%s\n' '#!/bin/sh' 'exec flatpak run com.valvesoftware.Steam "$@"' >/usr/local/bin/steam && chmod +x /usr/local/bin/steam
-su - "$USER_NAME" -c 'flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo'
-su - "$USER_NAME" -c 'flatpak -y install flathub com.heroicgameslauncher.hgl'
+su - "$USER_NAME" -c 'flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo' >>"$LOG" 2>&1 || true
+su - "$USER_NAME" -c 'flatpak -y install flathub com.heroicgameslauncher.hgl' >>"$LOG" 2>&1 || true
 cat >/etc/profile.d/flatpak-xdg.sh <<'EOF'
 export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/var/lib/flatpak/exports/share:$HOME/.local/share/flatpak/exports/share"
 EOF
 chmod +x /etc/profile.d/flatpak-xdg.sh
 
-# 5) XRDP config (session) -----------------------------------------------------
-step "5/11 Cấu hình XRDP dùng XFCE"
+# 4) XRDP session + tối ưu
+step "4/10 XRDP dùng XFCE + tối ưu fastpath/16-bit/nén"
 adduser xrdp ssl-cert >>"$LOG" 2>&1 || true
 su - "$USER_NAME" -c 'echo "startxfce4" > ~/.xsession'
 cat >/etc/xrdp/startwm.sh <<'EOF'
@@ -89,15 +69,13 @@ export XDG_SESSION_TYPE=x11
 exec startxfce4
 EOF
 chmod +x /etc/xrdp/startwm.sh
-systemctl enable --now xrdp >>"$LOG" 2>&1
+systemctl enable --now xrdp >>"$LOG" 2>&1 || true
 
-# 6) XRDP performance tuning ---------------------------------------------------
-step "6/11 Tối ưu hiệu năng XRDP (16-bit, compression, fastpath)"
-# Thay thế nguyên block [Globals] trong /etc/xrdp/xrdp.ini bằng cấu hình tối ưu
+# Tune /etc/xrdp/xrdp.ini
 if [ -f /etc/xrdp/xrdp.ini ]; then
   awk '
     BEGIN{printed=0}
-    /^\[Globals\]$/ { 
+    /^\[Globals\]$/ {
       print "[Globals]";
       print "bitmap_compression=true";
       print "bulk_compression=true";
@@ -107,70 +85,65 @@ if [ -f /etc/xrdp/xrdp.ini ]; then
       print "crypt_level=low";
       print "allow_channels=false";
       print "max_bpp=16";
-      # Bỏ qua phần cũ cho tới section mới
       skip=1; next
     }
     /^\[/ { if(skip){skip=0} }
     { if(!skip) print }
   ' /etc/xrdp/xrdp.ini > /etc/xrdp/xrdp.ini.new && mv /etc/xrdp/xrdp.ini.new /etc/xrdp/xrdp.ini
 fi
-
-# Đảm bảo sesman không ép bpp cao
-if [ -f /etc/xrdp/sesman.ini ]; then
-  sed -ri 's/^MaxSessions=.*/MaxSessions=50/' /etc/xrdp/sesman.ini || true
-fi
-
 systemctl restart xrdp || true
 
-# 7) VNC config ----------------------------------------------------------------
-step "7/11 VNC :0 (5900) – set pass lt4c"
+# 5) Tắt compositor & hiệu ứng của XFCE (giảm lag)
+step "5/10 Tắt compositor XFCE"
+apt -y install xfconf >>"$LOG" 2>&1 || true
+su - "$USER_NAME" -c 'xfconf-query -c xfwm4 -p /general/use_compositing -s false' || true
+
+# 6) VNC: chuyển sang x11vnc (mượt hơn), vô hiệu vncserver cũ nếu có
+step "6/10 Cài x11vnc + thay service VNC"
+apt -y install x11vnc >>"$LOG" 2>&1 || true
+
+# Tạo mật khẩu VNC (dùng chung lt4c)
 install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.vnc"
-su - "$USER_NAME" -c "printf '%s' '$VNC_PASS' | vncpasswd -f > ~/.vnc/passwd"
+su - "$USER_NAME" -c "printf '%s\n' '$VNC_PASS' | vncpasswd -f > ~/.vnc/passwd"
 chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.vnc/passwd"
 chmod 600 "/home/$USER_NAME/.vnc/passwd"
 
-cat >"/home/$USER_NAME/.vnc/xstartup" <<'EOF'
-#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-export XDG_SESSION_TYPE=x11
-export DESKTOP_SESSION=xfce
-[ -x /usr/bin/dbus-launch ] && eval $(/usr/bin/dbus-launch --exit-with-session)
-exec startxfce4
-EOF
-chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.vnc/xstartup"
-chmod +x "/home/$USER_NAME/.vnc/xstartup"
+# Vô hiệu TigerVNC service nếu tồn tại
+systemctl disable --now vncserver@0.service >>"$LOG" 2>&1 || true
 
-cat >/etc/systemd/system/vncserver@.service <<EOF
+# Service x11vnc với nén & cache khung hình
+cat >/etc/systemd/system/x11vnc.service <<EOF
 [Unit]
-Description=TigerVNC server on display :%i (user ${USER_NAME})
-After=network-online.target
+Description=x11vnc on :0 (fast settings)
+After=systemd-user-sessions.service display-manager.service network-online.target
 Wants=network-online.target
+
 [Service]
 Type=simple
 User=${USER_NAME}
 Group=${USER_NAME}
-WorkingDirectory=/home/${USER_NAME}
-Environment=HOME=/home/${USER_NAME}
-ExecStartPre=/usr/bin/bash -lc "/usr/bin/vncserver -kill :%i >/dev/null 2>&1 || true"
-ExecStart=/usr/bin/vncserver -fg -localhost no -geometry ${GEOM} :%i
-ExecStop=/usr/bin/vncserver -kill :%i
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/x11vnc -display :0 -rfbport ${VNC_PORT} \
+  -rfbauth /home/${USER_NAME}/.vnc/passwd \
+  -forever -shared -ncache 10 -ncache_cr -xdamage -repeat \
+  -solid "#222222" -rfbversion 3.8 -clip ${GEOM}
 Restart=on-failure
 RestartSec=2
+
 [Install]
 WantedBy=multi-user.target
 EOF
-systemctl daemon-reload
-systemctl enable vncserver@0.service >>"$LOG" 2>&1
-systemctl restart vncserver@0.service >>"$LOG" 2>&1 || true
 
-# 8) Steam prewarm (headless, no sleep) ----------------------------------------
-step "8/11 Steam prewarm (headless)"
+systemctl daemon-reload
+systemctl enable --now x11vnc.service >>"$LOG" 2>&1 || true
+
+# 7) Steam prewarm headless (tuỳ chọn)
+step "7/10 Steam prewarm (headless)"
 apt -y install xvfb >>"$LOG" 2>&1 || true
 su - "$USER_NAME" -c 'xvfb-run -a flatpak run com.valvesoftware.Steam -silent || true'
 
-# 9) Steam desktop entry for XFCE ----------------------------------------------
-step "9/11 Tạo shortcut Steam cho XFCE"
+# 8) Shortcut Steam cho XFCE
+step "8/10 Tạo shortcut Steam cho XFCE"
 cat >/usr/share/applications/steam.desktop <<'EOF'
 [Desktop Entry]
 Name=Steam
@@ -181,32 +154,22 @@ Terminal=false
 Type=Application
 Categories=Game;
 EOF
-
 install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.local/share/applications"
-cat >"/home/$USER_NAME/.local/share/applications/steam.desktop" <<'EOF'
-[Desktop Entry]
-Name=Steam
-Comment=Steam (Flatpak)
-Exec=flatpak run com.valvesoftware.Steam
-Icon=com.valvesoftware.Steam
-Terminal=false
-Type=Application
-Categories=Game;
-EOF
+cp /usr/share/applications/steam.desktop "/home/$USER_NAME/.local/share/applications/steam.desktop"
 chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.local/share/applications/steam.desktop"
-
-# 10) Refresh menus ------------------------------------------------------------
-step "10/11 Làm mới menu XFCE"
 update-desktop-database /usr/share/applications || true
-gtk-update-icon-cache -q /usr/share/icons/hicolor || true
 su - "$USER_NAME" -c 'update-desktop-database ~/.local/share/applications || true'
-su - "$USER_NAME" -c 'xdg-desktop-menu forceupdate || true'
 pkill -HUP xfconfd || true
 
-# 11) Done ---------------------------------------------------------------------
-step "11/11 Hoàn tất (log: $LOG)"
+# 9) TCP low latency
+step "9/10 Bật TCP low latency"
+cat >/etc/sysctl.d/90-remote-desktop.conf <<'EOF'
+net.ipv4.tcp_low_latency = 1
+EOF
+sysctl --system >/dev/null 2>&1 || true
 
-# Robust IP detection
+# 10) Done + IP
+step "10/10 Hoàn tất (log: $LOG)"
 get_ip() {
   ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
 }
@@ -219,13 +182,13 @@ if [ -z "$IP" ] && command -v hostname >/dev/null 2>&1; then
 fi
 IP="${IP:-<no-ip-detected>}"
 
-echo "VNC  : ${IP}:5900  (pass: ${VNC_PASS})"
+echo "VNC  : ${IP}:${VNC_PORT}  (pass: ${VNC_PASS})"
 echo "XRDP : ${IP}:3389  (user ${USER_NAME} / ${USER_PASS})"
 
 echo "---- DEBUG ----"
 ip -o -4 addr show up | awk '{print $2, $4}' || true
 ip route || true
 ss -ltnp | awk 'NR==1 || /:3389|:5900/' || true
-systemctl --no-pager --full status xrdp | sed -n '1,20p' || true
-systemctl --no-pager --full status vncserver@0 | sed -n '1,20p' || true
+systemctl --no-pager --full status x11vnc | sed -n '1,25p' || true
+systemctl --no-pager --full status xrdp | sed -n '1,25p' || true
 echo "--------------"
