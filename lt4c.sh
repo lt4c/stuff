@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lt4c.sh
+# lt4c_bazzite_nvidia_t4.sh
 # Bazzite/Silverblue (Fedora-based, immutable) setup:
 # - NVIDIA T4 drivers via rpm-ostree (akmod)
 # - XRDP (32-bit color) + TigerVNC (:0)
@@ -91,7 +91,8 @@ INSTALL_HEROIC="${INSTALL_HEROIC:-1}"
 
 # ---- Enable/Start XRDP ----
 step "Enable and start XRDP"
-sudo systemctl enable --now xrdp
+sudo systemctl enable --now xrdp xrdp-sesman || true
+sudo systemctl restart xrdp xrdp-sesman || true
 
 # Configure XRDP color depth 32-bit
 if [ -f /etc/xrdp/xrdp.ini ]; then
@@ -105,7 +106,19 @@ if [ -f /etc/xrdp/startwm.sh ]; then
   sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOWM'
 #!/bin/sh
 export DESKTOP_SESSION=plasma
-exec /usr/bin/startplasma-x11
+if command -v startplasma-x11 >/dev/null 2>&1; then
+  if command -v startplasma-x11 >/dev/null 2>&1; then
+  exec /usr/bin/startplasma-x11
+elif command -v startxfce4 >/dev/null 2>&1; then
+  exec /usr/bin/startxfce4
+else
+  exec xterm
+fi
+elif command -v startxfce4 >/dev/null 2>&1; then
+  exec /usr/bin/startxfce4
+else
+  exec xterm
+fi
 EOWM
   sudo chmod +x /etc/xrdp/startwm.sh
 fi
@@ -122,7 +135,19 @@ sudo tee "$USER_HOME/.vnc/xstartup" >/dev/null <<'EOX'
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
-exec /usr/bin/startplasma-x11
+if command -v startplasma-x11 >/dev/null 2>&1; then
+  if command -v startplasma-x11 >/dev/null 2>&1; then
+  exec /usr/bin/startplasma-x11
+elif command -v startxfce4 >/dev/null 2>&1; then
+  exec /usr/bin/startxfce4
+else
+  exec xterm
+fi
+elif command -v startxfce4 >/dev/null 2>&1; then
+  exec /usr/bin/startxfce4
+else
+  exec xterm
+fi
 EOX
 sudo chown "$USER_NAME:$USER_NAME" "$USER_HOME/.vnc/xstartup"
 sudo chmod +x "$USER_HOME/.vnc/xstartup"
@@ -146,12 +171,19 @@ EOSVC
 sudo systemctl daemon-reload
 sudo systemctl enable --now "vncserver@${VNC_DISPLAY}"
 
-# ---- Open firewall ports if firewalld exists ----
+# ---- Open firewall ports (RDP 3389, VNC 5900) ----
 if command -v firewall-cmd >/dev/null 2>&1; then
-  step "Opening firewall ports (RDP 3389, VNC 5900)"
+  step "Opening firewall ports with firewalld"
   sudo firewall-cmd --add-service=rdp --permanent || true
   sudo firewall-cmd --add-port=5900/tcp --permanent || true
   sudo firewall-cmd --reload || true
+elif command -v iptables >/dev/null 2>&1; then
+  step "Opening firewall ports with iptables"
+  sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT || true
+  sudo iptables -I INPUT -p tcp --dport 5900 -j ACCEPT || true
+  if command -v service >/dev/null 2>&1; then
+    sudo service iptables save || true
+  fi
 fi
 
 # ---- Flatpak apps (Steam, Chromium, Sunshine, optional Heroic) ----
@@ -235,19 +267,6 @@ sudo chmod +x "$DESK"/*.desktop
 echo 'net.ipv4.tcp_low_latency = 1' | sudo tee /etc/sysctl.d/90-remote-desktop.conf >/dev/null
 sudo sysctl --system >/dev/null || true
 
-
-# ---- Sunshine Flatpak auto-fix for iOS (symlink + permissions) ----
-step "Apply Flatpak Sunshine iOS connectivity fix"
-# Ensure config directory for Flatpak
-FLATPAK_SUN_DIR="$USER_HOME/.var/app/dev.lizardbyte.sunshine/config"
-sudo -u "$USER_NAME" install -d -m 0755 "$FLATPAK_SUN_DIR"
-if [ ! -e "$FLATPAK_SUN_DIR/sunshine" ]; then
-  sudo -u "$USER_NAME" ln -s "$USER_HOME/.config/sunshine" "$FLATPAK_SUN_DIR/sunshine" || true
-fi
-
-# Grant Flatpak Sunshine access to home dir
-flatpak override --user dev.lizardbyte.sunshine --filesystem=home || true
-
 # ---- Print connection info ----
 IP="$(hostname -I | awk '{print $1}')"
 echo "---------------------------------------------"
@@ -296,10 +315,10 @@ echo ""
 echo "============================================================"
 echo "✅ To run this installer with default parameters, execute:"
 echo ""
-echo "  chmod +x lt4c.sh"
+echo "  chmod +x lt4c_bazzite_nvidia_t4.sh"
 echo "  sudo env USER_NAME=lt4c USER_PASS=lt4c VNC_PASS=lt4c \\"
 echo "    GEOM=1280x720 XRDP_COLOR_BPP=32 INSTALL_HEROIC=1 \\"
-echo "    ./lt4c.sh"
+echo "    ./lt4c_bazzite_nvidia_t4.sh"
 echo ""
 echo "You can change USER_NAME, USER_PASS, VNC_PASS, GEOM, XRDP_COLOR_BPP, or INSTALL_HEROIC as needed."
 echo "============================================================"
