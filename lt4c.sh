@@ -235,6 +235,19 @@ sudo chmod +x "$DESK"/*.desktop
 echo 'net.ipv4.tcp_low_latency = 1' | sudo tee /etc/sysctl.d/90-remote-desktop.conf >/dev/null
 sudo sysctl --system >/dev/null || true
 
+
+# ---- Sunshine Flatpak auto-fix for iOS (symlink + permissions) ----
+step "Apply Flatpak Sunshine iOS connectivity fix"
+# Ensure config directory for Flatpak
+FLATPAK_SUN_DIR="$USER_HOME/.var/app/dev.lizardbyte.sunshine/config"
+sudo -u "$USER_NAME" install -d -m 0755 "$FLATPAK_SUN_DIR"
+if [ ! -e "$FLATPAK_SUN_DIR/sunshine" ]; then
+  sudo -u "$USER_NAME" ln -s "$USER_HOME/.config/sunshine" "$FLATPAK_SUN_DIR/sunshine" || true
+fi
+
+# Grant Flatpak Sunshine access to home dir
+flatpak override --user dev.lizardbyte.sunshine --filesystem=home || true
+
 # ---- Print connection info ----
 IP="$(hostname -I | awk '{print $1}')"
 echo "---------------------------------------------"
