@@ -55,27 +55,85 @@ echo /win11/T4@123456 >> "$WORKDIR/srv/lab"
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
 
-cat <<EOF > "$WORKDIR/opt/bootlocal.sh"
+cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
 #!/bin/sh
+# TinyCore headless bootstrap: network, SSH, XRDP, VNC, GUI, write image, reboot
 
+# --- Network ---
 sudo udhcpc
+IP_NOW="$(/sbin/ifconfig | awk '/inet addr:/{gsub("addr:","",$2); print $2}' | paste -sd, -)"
+echo "IP(s): ${IP_NOW}" >> /srv/lab
 
-echo "Installation started" >> /srv/lab
+# --- Lightweight HTTP status page on :80 ---
 su tc -c "sudo /srv/busybox httpd -p 80 -h /srv"
 
+# --- Base tools ---
 su tc -c "tce-load -wi ntfs-3g"
 su tc -c "tce-load -wi gdisk"
 su tc -c "tce-load -wi openssh.tcz"
-
 sudo /usr/local/etc/init.d/openssh start
 
+# --- GUI + RDP/VNC stack ---
+# X/GUI (flwm) and servers
+# Note: Some extensions may be named slightly differently by mirror; we try best-effort.
+su tc -c "tce-load -wi Xorg-7.7.tcz xorg-server.tcz xorg-server-common.tcz Xprogs.tcz aterm.tcz flwm_topside.tcz"
+# XRDP (+xorgxrdp backend if available); ignore errors if missing
+su tc -c "tce-load -wi xrdp.tcz xorgxrdp.tcz || true"
+# VNC server
+su tc -c "tce-load -wi x11vnc.tcz"
+
+# Set user 'tc' password for XRDP login (default: lt4c)
+if grep -q '^tc:' /etc/passwd 2>/dev/null; then
+    echo 'tc:lt4c' | sudo chpasswd
+fi
+echo "Login -> user: tc | pass: lt4c" >> /srv/lab
+
+# Allow RDP/VNC through simple firewall (if any rules present)
+sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
+sudo iptables -I INPUT -p tcp --dport 5900 -j ACCEPT 2>/dev/null || true
+
+# Start X on :0 with flwm so x11vnc can mirror it
+# (run as tc; allow it to background)
+su - tc -c "startx >/srv/x_start.log 2>&1 &"
+sleep 2
+
+# Start x11vnc on :0 with default password 'lt4c'
+# (Store password file to avoid plain args on ps; fall back if tool missing)
+if command -v x11vnc >/dev/null 2>&1; then
+    su - tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd lt4c /home/tc/.vnc/passwd >/dev/null 2>&1"
+    su - tc -c "x11vnc -display :0 -rfbport 5900 -rfbauth /home/tc/.vnc/passwd -forever -shared -noxdamage -repeat -xkb >/srv/x11vnc.log 2>&1 &"
+    echo "VNC -> :5900 (pass: lt4c)" >> /srv/lab
+fi
+
+# Start XRDP (sesman + xrdp daemon)
+if [ -x /usr/local/etc/init.d/xrdp ]; then
+    sudo /usr/local/etc/init.d/xrdp start
+    echo "XRDP -> :3389 (user: tc / pass: lt4c)" >> /srv/lab
+else
+    echo "XRDP not available (xrdp.tcz missing)" >> /srv/lab
+fi
+
+# --- Original disk ops (KEEP AS-IS) ---
+
+# Bootloader stage
 sudo sh -c "wget --no-check-certificate -O grub.gz $SWAP_URL"
 sudo gunzip -c grub.gz | dd of=/dev/sda bs=4M
-echo formatting sda to GPT NTFS >> /srv/lab
+echo "Formatting /dev/sda to GPT + NTFS (Data)" >> /srv/lab
 sudo sgdisk -d 2 /dev/sda
-sudo sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda 
+sudo sgdisk -n 2:0:0 -t 2:0700 -c 2:\"Data\" /dev/sda 
 sudo mkfs.ntfs -f /dev/sda2 -L HDD_DATA
-sudo sh -c '(wget --no-check-certificate --https-only --tries=10 --timeout=30 -O- "$GZ_LINK" | gunzip | dd of=/dev/sdb bs=4M) & i=0; while kill -0 \$(pidof dd) 2>/dev/null; do echo "Installing... (\${i}s)"; echo "Installing... (\${i}s)" >> /srv/lab; sleep 1; i=\$((i+1)); done; echo "Done in \${i}s"; echo "Installing completed in \${i}s" >> /srv/lab'
+
+# Stream OS image from Dropbox into /dev/sdb (with live progress to /srv/lab)
+sudo sh -c '(\
+  wget --no-check-certificate --https-only --tries=10 --timeout=30 -O- "$GZ_LINK" \
+  | gunzip | dd of=/dev/sdb bs=4M \
+) & i=0; \
+while kill -0 $(pidof dd) 2>/dev/null; do \
+  echo "Installing... (${i}s)"; echo "Installing... (${i}s)" >> /srv/lab; \
+  sleep 1; i=$((i+1)); \
+done; \
+echo "Done in ${i}s"; echo "Installing completed in ${i}s" >> /srv/lab'
+
 sleep 1
 sudo reboot
 EOF
