@@ -4,13 +4,6 @@
 # LT4C — LifeTech4Code
 # Copyright © 2024–2025 LT4C
 # SPDX-License-Identifier: MIT
-#
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files (the “Software”), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions…
 
 set -euo pipefail
 
@@ -48,39 +41,43 @@ gzip -dc "$INITRD_PATH" | cpio -idmv
 
 echo "[4/6] Injecting SSH startup script and BusyBox..."
 mkdir -p "$WORKDIR/srv"
-
-curl ifconfig.me > "$WORKDIR/srv/lab"
-echo /win11/T4@123456 >> "$WORKDIR/srv/lab"
-
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
 
 cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
 #!/bin/sh
-# TinyCore headless bootstrap: network, SSH, XRDP, VNC, GUI, write image, reboot
+# TinyCore headless bootstrap: robust network, SSH, XRDP, VNC, diagnostics, write image, reboot
 
 USER_NAME="lt4c"
 USER_PASS="lt4c"
 
-# --- Network ---
-sudo udhcpc
-# Capture IPv4 addresses robustly
+log() { echo "$(date '+%F %T') | $*"; echo "$(date '+%F %T') | $*" >> /srv/lab; }
+
+# --- Robust Network Bring-up ---
+log "Bringing up network interfaces..."
+for IFACE in $(ls /sys/class/net | grep -v '^lo$'); do
+  ip link set "$IFACE" up 2>/dev/null || true
+  udhcpc -b -i "$IFACE" -t 5 -T 4 >/srv/udhcpc_${IFACE}.log 2>&1 || true
+done
+
+# Compute IP(s)
 if command -v ip >/dev/null 2>&1; then
   IP_NOW="$(ip -4 addr show | awk '/inet /{print $2}' | paste -sd, -)"
 else
   IP_NOW="$(/sbin/ifconfig | awk '/inet (addr:)?/{for(i=1;i<=NF;i++){if($i ~ /addr:/){gsub("addr:","",$i); print $i}}}' | paste -sd, -)"
 fi
-echo "IP(s): ${IP_NOW}" >> /srv/lab
+log "IP(s): ${IP_NOW}"
 
 # --- Lightweight HTTP status page on :80 ---
 /srv/busybox httpd -p 80 -h /srv
+log "HTTP status available at http://<this_ip>/"
 
 # --- Base tools ---
-tce-load -wi ntfs-3g
-tce-load -wi gdisk
-tce-load -wi openssh.tcz
-tce-load -wi net-tools.tcz || true   # for netstat (diagnostic)
-/usr/local/etc/init.d/openssh start
+tce-load -wi ntfs-3g;  log "Loaded ntfs-3g"
+tce-load -wi gdisk;    log "Loaded gdisk"
+tce-load -wi openssh.tcz; log "Loaded openssh"
+tce-load -wi net-tools.tcz || true
+/usr/local/etc/init.d/openssh start && log "SSH started"
 
 # --- Ensure user exists (USER_NAME) ---
 if ! id -u "$USER_NAME" >/dev/null 2>&1; then
@@ -89,22 +86,20 @@ if ! id -u "$USER_NAME" >/dev/null 2>&1; then
   fi
   mkdir -p "/home/$USER_NAME"
   chown -R "$USER_NAME":"staff" "/home/$USER_NAME" 2>/dev/null || chown -R "$USER_NAME":"$USER_NAME" "/home/$USER_NAME" 2>/dev/null || true
+  log "Created user $USER_NAME"
 fi
-# Set password (prefer chpasswd, fallback to passwd)
 if command -v chpasswd >/dev/null 2>&1; then
   echo "$USER_NAME:$USER_PASS" | chpasswd || true
 else
   (echo "$USER_PASS"; echo "$USER_PASS") | passwd "$USER_NAME" >/dev/null 2>&1 || true
 fi
-echo "Login -> user: $USER_NAME | pass: $USER_PASS" >> /srv/lab
+log "Password set for $USER_NAME"
 
 # --- GUI + RDP/VNC stack ---
-# X/GUI (flwm) and servers; include xorg-apps for xdpyinfo
 tce-load -wi Xorg-7.7.tcz xorg-server.tcz xorg-server-common.tcz xorg-apps.tcz Xprogs.tcz aterm.tcz flwm_topside.tcz
-# XRDP (+xorgxrdp backend if available); ignore errors if missing
 tce-load -wi xrdp.tcz xorgxrdp.tcz || true
-# VNC server
 tce-load -wi x11vnc.tcz
+log "GUI + RDP/VNC packages requested"
 
 # Allow RDP/VNC through simple firewall (if any rules present)
 iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
@@ -116,45 +111,42 @@ chown "$USER_NAME":"staff" "/home/$USER_NAME/.xsession" 2>/dev/null || chown "$U
 
 # Start X on :0 with flwm (local console) as USER_NAME
 su - "$USER_NAME" -c "startx >/srv/x_start.log 2>&1 &"
+log "startx launched"
 
-# Wait for X display :0 to be ready (max ~20s)
+# Wait up to 40s for X display :0 to be ready
 READY=0
-for i in $(seq 1 10); do
+for i in $(seq 1 20); do
     if command -v xdpyinfo >/dev/null 2>&1; then
         xdpyinfo -display :0 >/dev/null 2>&1 && READY=1 && break
     else
-        # Fallback: check Xorg process
         ps aux | grep -E '[X]org.*:0' >/dev/null 2>&1 && READY=1 && break
     fi
     sleep 2
 done
-[ "$READY" = "1" ] && echo "X display :0 is up" >> /srv/lab || echo "X display :0 NOT confirmed" >> /srv/lab
+[ "$READY" = "1" ] && log "X display :0 is UP" || log "X display :0 NOT confirmed"
 
 # --- Start VNC (as USER_NAME) ---
 if command -v x11vnc >/dev/null 2>&1; then
     su - "$USER_NAME" -c "mkdir -p /home/$USER_NAME/.vnc && x11vnc -storepasswd $USER_PASS /home/$USER_NAME/.vnc/passwd >/dev/null 2>&1"
-    su - "$USER_NAME" -c "x11vnc -display :0 -rfbport 5900 -rfbauth /home/$USER_NAME/.vnc/passwd -forever -shared -noxdamage -repeat -xkb >/srv/x11vnc.log 2>&1 &"
-    echo "✅ VNC running on :5900 (user: $USER_NAME, pass: $USER_PASS)" >> /srv/lab
+    su - "$USER_NAME" -c "x11vnc -display WAIT:0 -rfbport 5900 -rfbauth /home/$USER_NAME/.vnc/passwd -forever -shared -noxdamage -repeat -xkb >/srv/x11vnc.log 2>&1 &"
+    log "VNC started on :5900"
 else
-    echo "❌ x11vnc missing" >> /srv/lab
+    log "x11vnc missing"
 fi
 
 # --- Start XRDP ---
 if [ -x /usr/local/etc/init.d/xrdp ]; then
-    # Ensure config dir exists (some mirrors miss default files)
     mkdir -p /usr/local/etc/xrdp
-    [ -f /usr/local/etc/xrdp/sesman.ini ] || printf "%s
-" "[Sessions]" "AllowRootLogin=true" "DefaultWindowManager=/home/$USER_NAME/.xsession" > /usr/local/etc/xrdp/sesman.ini
-    /usr/local/etc/init.d/xrdp start
-    echo "✅ XRDP running on :3389 (user: $USER_NAME / pass: $USER_PASS)" >> /srv/lab
+    [ -f /usr/local/etc/xrdp/sesman.ini ] || printf "%s\n" "[Sessions]" "AllowRootLogin=true" "DefaultWindowManager=/home/$USER_NAME/.xsession" > /usr/local/etc/xrdp/sesman.ini
+    /usr/local/etc/init.d/xrdp start && log "XRDP service started"
 else
-    echo "❌ XRDP not available (xrdp.tcz missing on mirror)" >> /srv/lab
+    log "XRDP not available (xrdp.tcz missing on mirror)"
 fi
 
 # --- Diagnostics ---
-echo "=== Processes (Xorg/x11vnc/xrdp) ===" >> /srv/lab
+log "=== Processes (Xorg/x11vnc/xrdp) ==="
 ps aux | grep -E 'Xorg|x11vnc|xrdp' >> /srv/lab 2>&1 || true
-echo "=== Ports (3389/5900) ===" >> /srv/lab
+log "=== Ports (3389/5900) ==="
 if command -v netstat >/dev/null 2>&1; then
   netstat -tlnp | grep -E ':3389|:5900' >> /srv/lab 2>&1 || true
 else
@@ -162,17 +154,17 @@ else
 fi
 
 # --- Original disk ops (KEEP AS-IS) ---
-
-# Bootloader stage
 wget --no-check-certificate -O grub.gz "$SWAP_URL"
 gunzip -c grub.gz | dd of=/dev/sda bs=4M
+log "Wrote bootloader to /dev/sda"
 echo "Formatting /dev/sda to GPT + NTFS (Data)" >> /srv/lab
 sgdisk -d 2 /dev/sda
 sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda 
 mkfs.ntfs -f /dev/sda2 -L HDD_DATA
+log "Prepared /dev/sda2 as NTFS Data"
 
 # Stream OS image from Dropbox into /dev/sdb (with live progress to /srv/lab)
-sh -c '(\
+sh -c '(
   wget --no-check-certificate --https-only --tries=10 --timeout=30 -O- "$GZ_LINK" \
   | gunzip | dd of=/dev/sdb bs=4M \
 ) & i=0; \
@@ -181,10 +173,11 @@ while kill -0 $(pidof dd) 2>/dev/null; do \
   sleep 1; i=$((i+1)); \
 done; \
 echo "Done in ${i}s"; echo "Installing completed in ${i}s" >> /srv/lab'
+log "Imaging to /dev/sdb finished"
 
-sleep 1
+sleep 2
+log "Rebooting now"
 reboot
-
 EOF
 
 chmod +x "$WORKDIR/opt/bootlocal.sh"
@@ -200,7 +193,7 @@ cat <<EOF >> "$GRUB_ENTRY"
 menuentry "🔧 TinyCore SSH Auto" {
     insmod part_gpt
     insmod ext2
-    linux $KERNEL_PATH console=ttyS0 quiet
+    linux $KERNEL_PATH quiet
     initrd $INITRD_PATCHED
 }
 EOF
@@ -212,4 +205,4 @@ sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1'
 
 update-grub
 
-echo -e "\n✅ DONE! Reboot to enter TinyCore and SSH will be enabled."
+echo -e "\n✅ DONE! Reboot to enter TinyCore; then RDP/VNC should be available (user: lt4c / pass: lt4c)."
