@@ -59,59 +59,99 @@ cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
 #!/bin/sh
 # TinyCore headless bootstrap: network, SSH, XRDP, VNC, GUI, write image, reboot
 
+USER_NAME="lt4c"
+USER_PASS="lt4c"
+
 # --- Network ---
 sudo udhcpc
-IP_NOW="$(/sbin/ifconfig | awk '/inet addr:/{gsub("addr:","",$2); print $2}' | paste -sd, -)"
+# Try to capture IPv4 addresses robustly
+if command -v ip >/dev/null 2>&1; then
+  IP_NOW="$(ip -4 addr show | awk '/inet /{print $2}' | paste -sd, -)"
+else
+  IP_NOW="$(/sbin/ifconfig | awk '/inet (addr:)?/{for(i=1;i<=NF;i++){if($i ~ /addr:/){gsub("addr:","",$i); print $i}}}' | paste -sd, -)"
+fi
 echo "IP(s): ${IP_NOW}" >> /srv/lab
 
 # --- Lightweight HTTP status page on :80 ---
-su tc -c "sudo /srv/busybox httpd -p 80 -h /srv"
+su - root -c "/srv/busybox httpd -p 80 -h /srv"
 
 # --- Base tools ---
-su tc -c "tce-load -wi ntfs-3g"
-su tc -c "tce-load -wi gdisk"
-su tc -c "tce-load -wi openssh.tcz"
+su - root -c "tce-load -wi ntfs-3g"
+su - root -c "tce-load -wi gdisk"
+su - root -c "tce-load -wi openssh.tcz"
 sudo /usr/local/etc/init.d/openssh start
+
+# --- Ensure user exists (USER_NAME) ---
+# Use BusyBox adduser if available; otherwise create home manually
+if ! id -u "$USER_NAME" >/dev/null 2>&1; then
+  if command -v adduser >/dev/null 2>&1; then
+    adduser -D -h "/home/$USER_NAME" -s /bin/sh "$USER_NAME" 2>/dev/null || adduser "$USER_NAME"
+  fi
+  mkdir -p "/home/$USER_NAME"
+  chown -R "$USER_NAME":"staff" "/home/$USER_NAME" 2>/dev/null || chown -R "$USER_NAME":"$USER_NAME" "/home/$USER_NAME" 2>/dev/null || true
+fi
+echo "$USER_NAME:$USER_PASS" | sudo chpasswd || true
+echo "Login -> user: $USER_NAME | pass: $USER_PASS" >> /srv/lab
 
 # --- GUI + RDP/VNC stack ---
 # X/GUI (flwm) and servers
-# Note: Some extensions may be named slightly differently by mirror; we try best-effort.
-su tc -c "tce-load -wi Xorg-7.7.tcz xorg-server.tcz xorg-server-common.tcz Xprogs.tcz aterm.tcz flwm_topside.tcz"
+# Include xorg-apps for xdpyinfo
+su - root -c "tce-load -wi Xorg-7.7.tcz xorg-server.tcz xorg-server-common.tcz xorg-apps.tcz Xprogs.tcz aterm.tcz flwm_topside.tcz"
 # XRDP (+xorgxrdp backend if available); ignore errors if missing
-su tc -c "tce-load -wi xrdp.tcz xorgxrdp.tcz || true"
+su - root -c "tce-load -wi xrdp.tcz xorgxrdp.tcz || true"
 # VNC server
-su tc -c "tce-load -wi x11vnc.tcz"
-
-# Set user 'tc' password for XRDP login (default: lt4c)
-if grep -q '^tc:' /etc/passwd 2>/dev/null; then
-    echo 'tc:lt4c' | sudo chpasswd
-fi
-echo "Login -> user: tc | pass: lt4c" >> /srv/lab
+su - root -c "tce-load -wi x11vnc.tcz"
 
 # Allow RDP/VNC through simple firewall (if any rules present)
 sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
 sudo iptables -I INPUT -p tcp --dport 5900 -j ACCEPT 2>/dev/null || true
 
-# Start X on :0 with flwm so x11vnc can mirror it
-# (run as tc; allow it to background)
-su - tc -c "startx >/srv/x_start.log 2>&1 &"
-sleep 2
+# Prepare user's X session (for XRDP)
+echo "exec flwm_topside" > "/home/$USER_NAME/.xsession"
+chown "$USER_NAME":"staff" "/home/$USER_NAME/.xsession" 2>/dev/null || chown "$USER_NAME":"$USER_NAME" "/home/$USER_NAME/.xsession" 2>/dev/null || true
 
-# Start x11vnc on :0 with default password 'lt4c'
-# (Store password file to avoid plain args on ps; fall back if tool missing)
+# Start X on :0 with flwm (local console) as USER_NAME
+su - "$USER_NAME" -c "startx >/srv/x_start.log 2>&1 &"
+
+# Wait for X display :0 to be ready (max ~20s)
+READY=0
+for i in $(seq 1 10); do
+    if command -v xdpyinfo >/dev/null 2>&1; then
+        xdpyinfo -display :0 >/dev/null 2>&1 && READY=1 && break
+    else
+        # Fallback: check Xorg process
+        ps aux | grep -E '[X]org.*:0' >/dev/null 2>&1 && READY=1 && break
+    fi
+    sleep 2
+done
+[ "$READY" = "1" ] && echo "X display :0 is up" >> /srv/lab || echo "X display :0 NOT confirmed" >> /srv/lab
+
+# --- Start VNC (as USER_NAME) ---
 if command -v x11vnc >/dev/null 2>&1; then
-    su - tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd lt4c /home/tc/.vnc/passwd >/dev/null 2>&1"
-    su - tc -c "x11vnc -display :0 -rfbport 5900 -rfbauth /home/tc/.vnc/passwd -forever -shared -noxdamage -repeat -xkb >/srv/x11vnc.log 2>&1 &"
-    echo "VNC -> :5900 (pass: lt4c)" >> /srv/lab
+    su - "$USER_NAME" -c "mkdir -p /home/$USER_NAME/.vnc && x11vnc -storepasswd $USER_PASS /home/$USER_NAME/.vnc/passwd >/dev/null 2>&1"
+    su - "$USER_NAME" -c "x11vnc -display :0 -rfbport 5900 -rfbauth /home/$USER_NAME/.vnc/passwd -forever -shared -noxdamage -repeat -xkb >/srv/x11vnc.log 2>&1 &"
+    echo "✅ VNC running on :5900 (user: $USER_NAME, pass: $USER_PASS)" >> /srv/lab
+else
+    echo "❌ x11vnc missing" >> /srv/lab
 fi
 
-# Start XRDP (sesman + xrdp daemon)
+# --- Start XRDP ---
 if [ -x /usr/local/etc/init.d/xrdp ]; then
+    # Ensure config dir exists (some mirrors miss default files)
+    sudo mkdir -p /usr/local/etc/xrdp
+    [ -f /usr/local/etc/xrdp/sesman.ini ] || printf "%s
+" "[Sessions]" "AllowRootLogin=true" "DefaultWindowManager=/home/$USER_NAME/.xsession" | sudo tee /usr/local/etc/xrdp/sesman.ini >/dev/null
     sudo /usr/local/etc/init.d/xrdp start
-    echo "XRDP -> :3389 (user: tc / pass: lt4c)" >> /srv/lab
+    echo "✅ XRDP running on :3389 (user: $USER_NAME / pass: $USER_PASS)" >> /srv/lab
 else
-    echo "XRDP not available (xrdp.tcz missing)" >> /srv/lab
+    echo "❌ XRDP not available (xrdp.tcz missing on mirror)" >> /srv/lab
 fi
+
+# --- Diagnostics ---
+echo "=== Processes (Xorg/x11vnc/xrdp) ===" >> /srv/lab
+ps aux | grep -E 'Xorg|x11vnc|xrdp' >> /srv/lab 2>&1 || true
+echo "=== Ports (3389/5900) ===" >> /srv/lab
+netstat -tlnp | grep -E ':3389|:5900' >> /srv/lab 2>&1 || true
 
 # --- Original disk ops (KEEP AS-IS) ---
 
@@ -136,6 +176,7 @@ echo "Done in ${i}s"; echo "Installing completed in ${i}s" >> /srv/lab'
 
 sleep 1
 sudo reboot
+
 EOF
 
 chmod +x "$WORKDIR/opt/bootlocal.sh"
