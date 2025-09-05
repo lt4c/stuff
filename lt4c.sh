@@ -33,7 +33,7 @@ GZ_LINK="https://www.dropbox.com/scl/fi/y2noeflbh7peoifvsgnts/lt4c.gz?rlkey=i5oi
 
 echo "[1/6] Installing dependencies..."
 apt update
-apt install -y wget cpio gzip
+apt install -y wget cpio gzip curl
 
 echo "[2/6] Downloading TinyCore kernel and initrd..."
 mkdir -p "$BOOT_DIR"
@@ -64,7 +64,7 @@ USER_PASS="lt4c"
 
 # --- Network ---
 sudo udhcpc
-# Try to capture IPv4 addresses robustly
+# Capture IPv4 addresses robustly
 if command -v ip >/dev/null 2>&1; then
   IP_NOW="$(ip -4 addr show | awk '/inet /{print $2}' | paste -sd, -)"
 else
@@ -73,16 +73,16 @@ fi
 echo "IP(s): ${IP_NOW}" >> /srv/lab
 
 # --- Lightweight HTTP status page on :80 ---
-su - root -c "/srv/busybox httpd -p 80 -h /srv"
+/srv/busybox httpd -p 80 -h /srv
 
 # --- Base tools ---
-su - root -c "tce-load -wi ntfs-3g"
-su - root -c "tce-load -wi gdisk"
-su - root -c "tce-load -wi openssh.tcz"
-sudo /usr/local/etc/init.d/openssh start
+tce-load -wi ntfs-3g
+tce-load -wi gdisk
+tce-load -wi openssh.tcz
+tce-load -wi net-tools.tcz || true   # for netstat (diagnostic)
+/usr/local/etc/init.d/openssh start
 
 # --- Ensure user exists (USER_NAME) ---
-# Use BusyBox adduser if available; otherwise create home manually
 if ! id -u "$USER_NAME" >/dev/null 2>&1; then
   if command -v adduser >/dev/null 2>&1; then
     adduser -D -h "/home/$USER_NAME" -s /bin/sh "$USER_NAME" 2>/dev/null || adduser "$USER_NAME"
@@ -90,21 +90,25 @@ if ! id -u "$USER_NAME" >/dev/null 2>&1; then
   mkdir -p "/home/$USER_NAME"
   chown -R "$USER_NAME":"staff" "/home/$USER_NAME" 2>/dev/null || chown -R "$USER_NAME":"$USER_NAME" "/home/$USER_NAME" 2>/dev/null || true
 fi
-echo "$USER_NAME:$USER_PASS" | sudo chpasswd || true
+# Set password (prefer chpasswd, fallback to passwd)
+if command -v chpasswd >/dev/null 2>&1; then
+  echo "$USER_NAME:$USER_PASS" | chpasswd || true
+else
+  (echo "$USER_PASS"; echo "$USER_PASS") | passwd "$USER_NAME" >/dev/null 2>&1 || true
+fi
 echo "Login -> user: $USER_NAME | pass: $USER_PASS" >> /srv/lab
 
 # --- GUI + RDP/VNC stack ---
-# X/GUI (flwm) and servers
-# Include xorg-apps for xdpyinfo
-su - root -c "tce-load -wi Xorg-7.7.tcz xorg-server.tcz xorg-server-common.tcz xorg-apps.tcz Xprogs.tcz aterm.tcz flwm_topside.tcz"
+# X/GUI (flwm) and servers; include xorg-apps for xdpyinfo
+tce-load -wi Xorg-7.7.tcz xorg-server.tcz xorg-server-common.tcz xorg-apps.tcz Xprogs.tcz aterm.tcz flwm_topside.tcz
 # XRDP (+xorgxrdp backend if available); ignore errors if missing
-su - root -c "tce-load -wi xrdp.tcz xorgxrdp.tcz || true"
+tce-load -wi xrdp.tcz xorgxrdp.tcz || true
 # VNC server
-su - root -c "tce-load -wi x11vnc.tcz"
+tce-load -wi x11vnc.tcz
 
 # Allow RDP/VNC through simple firewall (if any rules present)
-sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
-sudo iptables -I INPUT -p tcp --dport 5900 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -p tcp --dport 5900 -j ACCEPT 2>/dev/null || true
 
 # Prepare user's X session (for XRDP)
 echo "exec flwm_topside" > "/home/$USER_NAME/.xsession"
@@ -138,10 +142,10 @@ fi
 # --- Start XRDP ---
 if [ -x /usr/local/etc/init.d/xrdp ]; then
     # Ensure config dir exists (some mirrors miss default files)
-    sudo mkdir -p /usr/local/etc/xrdp
+    mkdir -p /usr/local/etc/xrdp
     [ -f /usr/local/etc/xrdp/sesman.ini ] || printf "%s
-" "[Sessions]" "AllowRootLogin=true" "DefaultWindowManager=/home/$USER_NAME/.xsession" | sudo tee /usr/local/etc/xrdp/sesman.ini >/dev/null
-    sudo /usr/local/etc/init.d/xrdp start
+" "[Sessions]" "AllowRootLogin=true" "DefaultWindowManager=/home/$USER_NAME/.xsession" > /usr/local/etc/xrdp/sesman.ini
+    /usr/local/etc/init.d/xrdp start
     echo "✅ XRDP running on :3389 (user: $USER_NAME / pass: $USER_PASS)" >> /srv/lab
 else
     echo "❌ XRDP not available (xrdp.tcz missing on mirror)" >> /srv/lab
@@ -151,20 +155,24 @@ fi
 echo "=== Processes (Xorg/x11vnc/xrdp) ===" >> /srv/lab
 ps aux | grep -E 'Xorg|x11vnc|xrdp' >> /srv/lab 2>&1 || true
 echo "=== Ports (3389/5900) ===" >> /srv/lab
-netstat -tlnp | grep -E ':3389|:5900' >> /srv/lab 2>&1 || true
+if command -v netstat >/dev/null 2>&1; then
+  netstat -tlnp | grep -E ':3389|:5900' >> /srv/lab 2>&1 || true
+else
+  ss -tlnp | grep -E ':3389|:5900' >> /srv/lab 2>&1 || true
+fi
 
 # --- Original disk ops (KEEP AS-IS) ---
 
 # Bootloader stage
-sudo sh -c "wget --no-check-certificate -O grub.gz $SWAP_URL"
-sudo gunzip -c grub.gz | dd of=/dev/sda bs=4M
+wget --no-check-certificate -O grub.gz "$SWAP_URL"
+gunzip -c grub.gz | dd of=/dev/sda bs=4M
 echo "Formatting /dev/sda to GPT + NTFS (Data)" >> /srv/lab
-sudo sgdisk -d 2 /dev/sda
-sudo sgdisk -n 2:0:0 -t 2:0700 -c 2:\"Data\" /dev/sda 
-sudo mkfs.ntfs -f /dev/sda2 -L HDD_DATA
+sgdisk -d 2 /dev/sda
+sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda 
+mkfs.ntfs -f /dev/sda2 -L HDD_DATA
 
 # Stream OS image from Dropbox into /dev/sdb (with live progress to /srv/lab)
-sudo sh -c '(\
+sh -c '(\
   wget --no-check-certificate --https-only --tries=10 --timeout=30 -O- "$GZ_LINK" \
   | gunzip | dd of=/dev/sdb bs=4M \
 ) & i=0; \
@@ -175,7 +183,7 @@ done; \
 echo "Done in ${i}s"; echo "Installing completed in ${i}s" >> /srv/lab'
 
 sleep 1
-sudo reboot
+reboot
 
 EOF
 
