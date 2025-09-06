@@ -1,208 +1,324 @@
-#!/bin/bash
-# shellcheck shell=bash
+#!/usr/bin/env bash
+# lt4c_bazzite_nvidia_t4.sh
+# Bazzite/Silverblue (Fedora-based, immutable) setup:
+# - NVIDIA T4 drivers via rpm-ostree (akmod)
+# - XRDP (32-bit color) + TigerVNC (:0)
+# - Flatpak apps: Steam, Chromium, Sunshine (+ optional Heroic)
+# - Desktop shortcuts + Sunshine autostart
+# - Continues automatically after the reboot required by NVIDIA install
 
-# LT4C — LifeTech4Code
-# Copyright © 2024–2025 LT4C
-# SPDX-License-Identifier: MIT
+set -Eeuo pipefail
 
-set -euo pipefail
+LOG="/var/log/lt4c_bazzite_setup.log"
+: >"$LOG"
 
-# === CONFIG ===
-TCE_VERSION="14.x"
-ARCH="x86_64"
-TCE_MIRROR="http://tinycorelinux.net"
-BOOT_DIR="/boot/tinycore"
-WORKDIR="/tmp/tinycore_initrd"
-KERNEL_URL="$TCE_MIRROR/$TCE_VERSION/$ARCH/release/distribution_files/vmlinuz64"
-INITRD_URL="$TCE_MIRROR/$TCE_VERSION/$ARCH/release/distribution_files/corepure64.gz"
-KERNEL_PATH="$BOOT_DIR/vmlinuz64"
-INITRD_PATH="$BOOT_DIR/corepure64.gz"
-INITRD_PATCHED="$BOOT_DIR/corepure64-ssh.gz"
-GRUB_ENTRY="/etc/grub.d/40_custom"
-GRUB_CFG="/etc/default/grub"
-BUSYBOX_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/busybox"
-SWAP_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/grubsdbuefiwin.gz"
-GZ_LINK="https://www.dropbox.com/scl/fi/y2noeflbh7peoifvsgnts/lt4c.gz?rlkey=i5oiiw6po2lrrqh7appo4spo4&st=ft2humdg&dl=1"
+# ---- Configurable ----
+USER_NAME="${USER_NAME:-lt4c}"
+USER_PASS="${USER_PASS:-lt4c}"
+VNC_PASS="${VNC_PASS:-lt4c}"
+GEOM="${GEOM:-1280x720}"
+VNC_DISPLAY="${VNC_DISPLAY:-0}"
+XRDP_COLOR_BPP="${XRDP_COLOR_BPP:-32}"
+INSTALL_HEROIC="${INSTALL_HEROIC:-1}"   # 1 = yes, 0 = no
 
-echo "[1/6] Installing dependencies..."
-apt update
-apt install -y wget cpio gzip curl
+# ---- Helpers ----
+step(){ echo -e "\n[STEP] $*" | tee -a "$LOG"; }
+warn(){ echo -e "[WARN] $*" | tee -a "$LOG"; }
+ok(){ echo -e "[OK] $*" | tee -a "$LOG"; }
 
-echo "[2/6] Downloading TinyCore kernel and initrd..."
-mkdir -p "$BOOT_DIR"
-wget -q -O "$KERNEL_PATH" "$KERNEL_URL"
-wget -q -O "$INITRD_PATH" "$INITRD_URL"
+need_cmd(){ command -v "$1" >/dev/null 2>&1 || { warn "Missing command: $1"; return 1; }; }
 
-echo "[3/6] Unpacking initrd..."
-rm -rf "$WORKDIR"
-mkdir -p "$WORKDIR"
-cd "$WORKDIR"
-gzip -dc "$INITRD_PATH" | cpio -idmv
-
-echo "[4/6] Injecting SSH startup script and BusyBox..."
-mkdir -p "$WORKDIR/srv"
-wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
-chmod +x "$WORKDIR/srv/busybox"
-
-cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
-#!/bin/sh
-# TinyCore headless bootstrap: robust network, SSH, XRDP, VNC, diagnostics, write image, reboot
-
-USER_NAME="lt4c"
-USER_PASS="lt4c"
-
-log() { echo "$(date '+%F %T') | $*"; echo "$(date '+%F %T') | $*" >> /srv/lab; }
-
-# --- Robust Network Bring-up ---
-log "Bringing up network interfaces..."
-for IFACE in $(ls /sys/class/net | grep -v '^lo$'); do
-  ip link set "$IFACE" up 2>/dev/null || true
-  udhcpc -b -i "$IFACE" -t 5 -T 4 >/srv/udhcpc_${IFACE}.log 2>&1 || true
-done
-
-# Compute IP(s)
-if command -v ip >/dev/null 2>&1; then
-  IP_NOW="$(ip -4 addr show | awk '/inet /{print $2}' | paste -sd, -)"
-else
-  IP_NOW="$(/sbin/ifconfig | awk '/inet (addr:)?/{for(i=1;i<=NF;i++){if($i ~ /addr:/){gsub("addr:","",$i); print $i}}}' | paste -sd, -)"
+# Detect rpm-ostree system
+if ! need_cmd rpm-ostree; then
+  echo "This script is intended for Bazzite / Fedora Silverblue/Kinoite (rpm-ostree). Aborting." | tee -a "$LOG"
+  exit 1
 fi
-log "IP(s): ${IP_NOW}"
 
-# --- Lightweight HTTP status page on :80 ---
-/srv/busybox httpd -p 80 -h /srv
-log "HTTP status available at http://<this_ip>/"
-
-# --- Base tools ---
-tce-load -wi ntfs-3g;  log "Loaded ntfs-3g"
-tce-load -wi gdisk;    log "Loaded gdisk"
-tce-load -wi openssh.tcz; log "Loaded openssh"
-tce-load -wi net-tools.tcz || true
-/usr/local/etc/init.d/openssh start && log "SSH started"
-
-# --- Ensure user exists (USER_NAME) ---
+# Create target user if not exists
+step "Creating user ${USER_NAME} (if needed)"
 if ! id -u "$USER_NAME" >/dev/null 2>&1; then
-  if command -v adduser >/dev/null 2>&1; then
-    adduser -D -h "/home/$USER_NAME" -s /bin/sh "$USER_NAME" 2>/dev/null || adduser "$USER_NAME"
+  sudo useradd -m -G wheel "$USER_NAME" || true
+  echo "${USER_NAME}:${USER_PASS}" | sudo chpasswd
+else
+  ok "User ${USER_NAME} already exists"
+fi
+
+USER_HOME="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+USER_UID="$(id -u "$USER_NAME")"
+USER_GID="$(id -g "$USER_NAME")"
+
+# Prepare state dir for continuation
+STATE_DIR="/var/lib/lt4c"
+sudo mkdir -p "$STATE_DIR"
+sudo chown root:root "$STATE_DIR"
+sudo chmod 0755 "$STATE_DIR"
+
+# ------------------------------
+# Phase 1: Layer base packages & NVIDIA (requires reboot)
+# ------------------------------
+step "Layering NVIDIA drivers and remote desktop base packages (requires reboot)"
+# On Fedora/Bazzite, akmod-nvidia builds the kernel module after reboot.
+# Include XRDP and TigerVNC server in the same deployment to reduce reboots.
+sudo rpm-ostree install \
+  akmod-nvidia \
+  xorg-x11-drv-nvidia \
+  xorg-x11-drv-nvidia-cuda \
+  xorg-x11-drv-nvidia-cuda-libs \
+  xrdp xorgxrdp \
+  tigervnc-server \
+  || true
+
+# Prepare the continuation script to run after reboot
+CONT_SH="${STATE_DIR}/continue.sh"
+sudo tee "$CONT_SH" >/dev/null <<'EOS'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+LOG="/var/log/lt4c_bazzite_setup.log"
+step(){ echo -e "\n[STEP] $*" | tee -a "$LOG"; }
+ok(){ echo -e "[OK] $*" | tee -a "$LOG"; }
+warn(){ echo -e "[WARN] $*" | tee -a "$LOG"; }
+
+USER_NAME="${USER_NAME:-lt4c}"
+USER_HOME="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+USER_UID="$(id -u "$USER_NAME")"
+USER_GID="$(id -g "$USER_NAME")"
+VNC_PASS="${VNC_PASS:-lt4c}"
+GEOM="${GEOM:-1280x720}"
+VNC_DISPLAY="${VNC_DISPLAY:-0}"
+XRDP_COLOR_BPP="${XRDP_COLOR_BPP:-32}"
+INSTALL_HEROIC="${INSTALL_HEROIC:-1}"
+
+# ---- Enable/Start XRDP ----
+step "Enable and start XRDP"
+sudo systemctl enable --now xrdp xrdp-sesman || true
+sudo systemctl restart xrdp xrdp-sesman || true
+
+# Configure XRDP color depth 32-bit
+if [ -f /etc/xrdp/xrdp.ini ]; then
+  sudo sed -i "s/^max_bpp=.*/max_bpp=${XRDP_COLOR_BPP}/" /etc/xrdp/xrdp.ini || true
+  grep -q "^max_bpp=${XRDP_COLOR_BPP}" /etc/xrdp/xrdp.ini || echo "max_bpp=${XRDP_COLOR_BPP}" | sudo tee -a /etc/xrdp/xrdp.ini >/dev/null
+  sudo systemctl restart xrdp
+fi
+
+# Use KDE Plasma X11 session by default (Bazzite is KDE-based)
+if [ -f /etc/xrdp/startwm.sh ]; then
+  sudo tee /etc/xrdp/startwm.sh >/dev/null <<'EOWM'
+#!/bin/sh
+export DESKTOP_SESSION=plasma
+if command -v startplasma-x11 >/dev/null 2>&1; then
+  if command -v startplasma-x11 >/dev/null 2>&1; then
+  exec /usr/bin/startplasma-x11
+elif command -v startxfce4 >/dev/null 2>&1; then
+  exec /usr/bin/startxfce4
+else
+  exec xterm
+fi
+elif command -v startxfce4 >/dev/null 2>&1; then
+  exec /usr/bin/startxfce4
+else
+  exec xterm
+fi
+EOWM
+  sudo chmod +x /etc/xrdp/startwm.sh
+fi
+
+# ---- Configure TigerVNC as system service on :$VNC_DISPLAY ----
+step "Configure TigerVNC service :$VNC_DISPLAY"
+sudo install -d -m 0700 -o "$USER_NAME" -g "$USER_NAME" "$USER_HOME/.vnc"
+sudo -u "$USER_NAME" /bin/bash -lc "printf '%s\n' \"$VNC_PASS\" | vncpasswd -f > ~/.vnc/passwd"
+sudo chown "$USER_NAME:$USER_NAME" "$USER_HOME/.vnc/passwd"
+sudo chmod 0600 "$USER_HOME/.vnc/passwd"
+
+# xstartup uses KDE Plasma
+sudo tee "$USER_HOME/.vnc/xstartup" >/dev/null <<'EOX'
+#!/bin/sh
+unset SESSION_MANAGER
+unset DBUS_SESSION_BUS_ADDRESS
+if command -v startplasma-x11 >/dev/null 2>&1; then
+  if command -v startplasma-x11 >/dev/null 2>&1; then
+  exec /usr/bin/startplasma-x11
+elif command -v startxfce4 >/dev/null 2>&1; then
+  exec /usr/bin/startxfce4
+else
+  exec xterm
+fi
+elif command -v startxfce4 >/dev/null 2>&1; then
+  exec /usr/bin/startxfce4
+else
+  exec xterm
+fi
+EOX
+sudo chown "$USER_NAME:$USER_NAME" "$USER_HOME/.vnc/xstartup"
+sudo chmod +x "$USER_HOME/.vnc/xstartup"
+
+sudo tee /etc/systemd/system/vncserver@.service >/dev/null <<EOSVC
+[Unit]
+Description=TigerVNC server on display :%i (user ${USER_NAME})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${USER_NAME}
+ExecStart=/usr/bin/vncserver -fg -localhost no -geometry ${GEOM} :%i
+ExecStop=/usr/bin/vncserver -kill :%i
+
+[Install]
+WantedBy=multi-user.target
+EOSVC
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now "vncserver@${VNC_DISPLAY}"
+
+# ---- Open firewall ports (RDP 3389, VNC 5900) ----
+if command -v firewall-cmd >/dev/null 2>&1; then
+  step "Opening firewall ports with firewalld"
+  sudo firewall-cmd --add-service=rdp --permanent || true
+  sudo firewall-cmd --add-port=5900/tcp --permanent || true
+  sudo firewall-cmd --reload || true
+elif command -v iptables >/dev/null 2>&1; then
+  step "Opening firewall ports with iptables"
+  sudo iptables -I INPUT -p tcp --dport 3389 -j ACCEPT || true
+  sudo iptables -I INPUT -p tcp --dport 5900 -j ACCEPT || true
+  if command -v service >/dev/null 2>&1; then
+    sudo service iptables save || true
   fi
-  mkdir -p "/home/$USER_NAME"
-  chown -R "$USER_NAME":"staff" "/home/$USER_NAME" 2>/dev/null || chown -R "$USER_NAME":"$USER_NAME" "/home/$USER_NAME" 2>/dev/null || true
-  log "Created user $USER_NAME"
-fi
-if command -v chpasswd >/dev/null 2>&1; then
-  echo "$USER_NAME:$USER_PASS" | chpasswd || true
-else
-  (echo "$USER_PASS"; echo "$USER_PASS") | passwd "$USER_NAME" >/dev/null 2>&1 || true
-fi
-log "Password set for $USER_NAME"
-
-# --- GUI + RDP/VNC stack ---
-tce-load -wi Xorg-7.7.tcz xorg-server.tcz xorg-server-common.tcz xorg-apps.tcz Xprogs.tcz aterm.tcz flwm_topside.tcz
-tce-load -wi xrdp.tcz xorgxrdp.tcz || true
-tce-load -wi x11vnc.tcz
-log "GUI + RDP/VNC packages requested"
-
-# Allow RDP/VNC through simple firewall (if any rules present)
-iptables -I INPUT -p tcp --dport 3389 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -p tcp --dport 5900 -j ACCEPT 2>/dev/null || true
-
-# Prepare user's X session (for XRDP)
-echo "exec flwm_topside" > "/home/$USER_NAME/.xsession"
-chown "$USER_NAME":"staff" "/home/$USER_NAME/.xsession" 2>/dev/null || chown "$USER_NAME":"$USER_NAME" "/home/$USER_NAME/.xsession" 2>/dev/null || true
-
-# Start X on :0 with flwm (local console) as USER_NAME
-su - "$USER_NAME" -c "startx >/srv/x_start.log 2>&1 &"
-log "startx launched"
-
-# Wait up to 40s for X display :0 to be ready
-READY=0
-for i in $(seq 1 20); do
-    if command -v xdpyinfo >/dev/null 2>&1; then
-        xdpyinfo -display :0 >/dev/null 2>&1 && READY=1 && break
-    else
-        ps aux | grep -E '[X]org.*:0' >/dev/null 2>&1 && READY=1 && break
-    fi
-    sleep 2
-done
-[ "$READY" = "1" ] && log "X display :0 is UP" || log "X display :0 NOT confirmed"
-
-# --- Start VNC (as USER_NAME) ---
-if command -v x11vnc >/dev/null 2>&1; then
-    su - "$USER_NAME" -c "mkdir -p /home/$USER_NAME/.vnc && x11vnc -storepasswd $USER_PASS /home/$USER_NAME/.vnc/passwd >/dev/null 2>&1"
-    su - "$USER_NAME" -c "x11vnc -display WAIT:0 -rfbport 5900 -rfbauth /home/$USER_NAME/.vnc/passwd -forever -shared -noxdamage -repeat -xkb >/srv/x11vnc.log 2>&1 &"
-    log "VNC started on :5900"
-else
-    log "x11vnc missing"
 fi
 
-# --- Start XRDP ---
-if [ -x /usr/local/etc/init.d/xrdp ]; then
-    mkdir -p /usr/local/etc/xrdp
-    [ -f /usr/local/etc/xrdp/sesman.ini ] || printf "%s\n" "[Sessions]" "AllowRootLogin=true" "DefaultWindowManager=/home/$USER_NAME/.xsession" > /usr/local/etc/xrdp/sesman.ini
-    /usr/local/etc/init.d/xrdp start && log "XRDP service started"
-else
-    log "XRDP not available (xrdp.tcz missing on mirror)"
+# ---- Flatpak apps (Steam, Chromium, Sunshine, optional Heroic) ----
+step "Install Flatpak apps (Steam, Chromium, Sunshine)"
+if ! flatpak remotes | grep -qi flathub; then
+  sudo -u "$USER_NAME" flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 fi
 
-# --- Diagnostics ---
-log "=== Processes (Xorg/x11vnc/xrdp) ==="
-ps aux | grep -E 'Xorg|x11vnc|xrdp' >> /srv/lab 2>&1 || true
-log "=== Ports (3389/5900) ==="
-if command -v netstat >/dev/null 2>&1; then
-  netstat -tlnp | grep -E ':3389|:5900' >> /srv/lab 2>&1 || true
-else
-  ss -tlnp | grep -E ':3389|:5900' >> /srv/lab 2>&1 || true
+sudo -u "$USER_NAME" flatpak install -y flathub \
+  com.valvesoftware.Steam \
+  org.chromium.Chromium \
+  dev.lizardbyte.sunshine || true
+
+if [ "${INSTALL_HEROIC}" = "1" ]; then
+  sudo -u "$USER_NAME" flatpak install -y flathub com.heroicgameslauncher.hgl || true
 fi
 
-# --- Original disk ops (KEEP AS-IS) ---
-wget --no-check-certificate -O grub.gz "$SWAP_URL"
-gunzip -c grub.gz | dd of=/dev/sda bs=4M
-log "Wrote bootloader to /dev/sda"
-echo "Formatting /dev/sda to GPT + NTFS (Data)" >> /srv/lab
-sgdisk -d 2 /dev/sda
-sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda 
-mkfs.ntfs -f /dev/sda2 -L HDD_DATA
-log "Prepared /dev/sda2 as NTFS Data"
-
-# Stream OS image from Dropbox into /dev/sdb (with live progress to /srv/lab)
-sh -c '(
-  wget --no-check-certificate --https-only --tries=10 --timeout=30 -O- "$GZ_LINK" \
-  | gunzip | dd of=/dev/sdb bs=4M \
-) & i=0; \
-while kill -0 $(pidof dd) 2>/dev/null; do \
-  echo "Installing... (${i}s)"; echo "Installing... (${i}s)" >> /srv/lab; \
-  sleep 1; i=$((i+1)); \
-done; \
-echo "Done in ${i}s"; echo "Installing completed in ${i}s" >> /srv/lab'
-log "Imaging to /dev/sdb finished"
-
-sleep 2
-log "Rebooting now"
-reboot
-EOF
-
-chmod +x "$WORKDIR/opt/bootlocal.sh"
-
-echo "[5/6] Repacking patched initrd..."
-cd "$WORKDIR"
-find . | cpio -o -H newc | gzip -c > "$INITRD_PATCHED"
-
-echo "[6/6] Adding GRUB entry and setting default..."
-if ! grep -q "🔧 TinyCore SSH Auto" "$GRUB_ENTRY"; then
-cat <<EOF >> "$GRUB_ENTRY"
-
-menuentry "🔧 TinyCore SSH Auto" {
-    insmod part_gpt
-    insmod ext2
-    linux $KERNEL_PATH quiet
-    initrd $INITRD_PATCHED
+# ---- Sunshine config + autostart ----
+step "Configure Sunshine apps and autostart"
+SUN_DIR="$USER_HOME/.config/sunshine"
+sudo -u "$USER_NAME" install -d -m 0755 "$SUN_DIR"
+sudo tee "$SUN_DIR/apps.json" >/dev/null <<EOJS
+{
+  "apps": [
+    { "name": "Steam",    "cmd": ["/usr/bin/flatpak","run","com.valvesoftware.Steam"], "working_dir": "$USER_HOME", "auto_detect": false },
+    { "name": "Chromium", "cmd": ["/usr/bin/flatpak","run","org.chromium.Chromium"],   "working_dir": "$USER_HOME", "auto_detect": false }
+  ]
 }
+EOJS
+sudo chown -R "$USER_NAME:$USER_NAME" "$SUN_DIR"
+
+# Autostart Sunshine on login
+AUTOSTART_DIR="$USER_HOME/.config/autostart"
+sudo -u "$USER_NAME" install -d -m 0755 "$AUTOSTART_DIR"
+sudo tee "$AUTOSTART_DIR/sunshine.desktop" >/dev/null <<'EOD'
+[Desktop Entry]
+Type=Application
+Name=Sunshine
+Exec=flatpak run dev.lizardbyte.sunshine
+X-GNOME-Autostart-enabled=true
+X-KDE-autostart-after=panel
+EOD
+sudo chown "$USER_NAME:$USER_NAME" "$AUTOSTART_DIR/sunshine.desktop"
+
+# ---- Desktop shortcuts ----
+step "Create Desktop shortcuts"
+DESK="$USER_HOME/Desktop"
+sudo -u "$USER_NAME" install -d -m 0755 "$DESK"
+
+sudo tee "$DESK/Steam.desktop" >/dev/null <<'EOD1'
+[Desktop Entry]
+Type=Application
+Name=Steam (Flatpak)
+Exec=flatpak run com.valvesoftware.Steam
+Icon=steam
+Terminal=false
+EOD1
+
+sudo tee "$DESK/Chromium.desktop" >/dev/null <<'EOD2'
+[Desktop Entry]
+Type=Application
+Name=Chromium (Flatpak)
+Exec=flatpak run org.chromium.Chromium
+Icon=chromium
+Terminal=false
+EOD2
+
+sudo tee "$DESK/Sunshine Web UI.desktop" >/dev/null <<'EOD3'
+[Desktop Entry]
+Type=Application
+Name=Sunshine Web UI
+Exec=xdg-open http://localhost:47990
+Icon=applications-internet
+Terminal=false
+EOD3
+
+sudo chown "$USER_NAME:$USER_NAME" "$DESK"/*.desktop
+sudo chmod +x "$DESK"/*.desktop
+
+# ---- Network tuning ----
+echo 'net.ipv4.tcp_low_latency = 1' | sudo tee /etc/sysctl.d/90-remote-desktop.conf >/dev/null
+sudo sysctl --system >/dev/null || true
+
+# ---- Print connection info ----
+IP="$(hostname -I | awk '{print $1}')"
+echo "---------------------------------------------"
+echo "XRDP     : ${IP}:3389 (user ${USER_NAME})"
+echo "TigerVNC : ${IP}:5900 (VNC pass set)"
+echo "Sunshine : http://${IP}:47990 (Flatpak)"
+echo "Desktop  : Steam, Chromium, Sunshine Web UI shortcuts created"
+echo "---------------------------------------------"
+ok "Post-reboot configuration completed."
+EOS
+
+sudo chmod +x "$CONT_SH"
+
+# Create a one-shot systemd unit to run the continuation after reboot
+POST_UNIT="/etc/systemd/system/lt4c-postreboot.service"
+sudo tee "$POST_UNIT" >/dev/null <<EOF
+[Unit]
+Description=LT4C Bazzite post-reboot continuation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=USER_NAME=${USER_NAME}
+Environment=VNC_PASS=${VNC_PASS}
+Environment=GEOM=${GEOM}
+Environment=VNC_DISPLAY=${VNC_DISPLAY}
+Environment=XRDP_COLOR_BPP=${XRDP_COLOR_BPP}
+Environment=INSTALL_HEROIC=${INSTALL_HEROIC}
+ExecStart=${CONT_SH}
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
 EOF
-fi
 
-# Set as default boot
-sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="🔧 TinyCore SSH Auto"/' "$GRUB_CFG" || echo 'GRUB_DEFAULT="🔧 TinyCore SSH Auto"' >> "$GRUB_CFG"
-sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1' >> "$GRUB_CFG"
+sudo systemctl daemon-reload
+sudo systemctl enable lt4c-postreboot.service
 
-update-grub
+# Inform and reboot into the new deployment
+step "Rebooting into new deployment to activate NVIDIA drivers and layered packages"
+echo "[INFO] The system will reboot now. After reboot, configuration will continue automatically." | tee -a "$LOG"
+sudo systemctl reboot
 
-echo -e "\n✅ DONE! Reboot to enter TinyCore; then RDP/VNC should be available (user: lt4c / pass: lt4c)."
+echo ""
+echo "============================================================"
+echo "✅ To run this installer with default parameters, execute:"
+echo ""
+echo "  chmod +x lt4c_bazzite_nvidia_t4.sh"
+echo "  sudo env USER_NAME=lt4c USER_PASS=lt4c VNC_PASS=lt4c \\"
+echo "    GEOM=1280x720 XRDP_COLOR_BPP=32 INSTALL_HEROIC=1 \\"
+echo "    ./lt4c_bazzite_nvidia_t4.sh"
+echo ""
+echo "You can change USER_NAME, USER_PASS, VNC_PASS, GEOM, XRDP_COLOR_BPP, or INSTALL_HEROIC as needed."
+echo "============================================================"
