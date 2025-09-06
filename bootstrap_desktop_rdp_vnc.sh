@@ -1,4 +1,4 @@
-# TẠO FILE
+# GHI ĐÈ FILE (đã gồm toàn bộ setup RDP/VNC + docker relaunch helper)
 cat > bootstrap_desktop_rdp_vnc.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -247,6 +247,72 @@ echo "  XRDP: /var/log/xrdp.log, /var/log/xrdp-sesman.log"
 XEOF
 chmod +x /usr/local/bin/fix_rdp_vnc.sh
 
+# ================== Docker relaunch helper ==================
+tee /usr/local/bin/docker-relaunch.sh >/dev/null <<'XEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+IMAGE_NAME="${RDPVNC_IMAGE:-rdpvnc:latest}"
+CONTAINER_NAME="${RDPVNC_NAME:-rdpvnc}"
+USE_HOST_NET="${USE_HOST_NET:-0}"   # 1 = --network host, else -p ports
+RDP_PORT="${RDP_PORT:-3389}"
+VNC_PORT="${VNC_PORT:-5901}"
+
+echo "[INFO] Docker relaunch helper"
+if ! command -v docker >/dev/null 2>&1 || [ ! -S /var/run/docker.sock ]; then
+  echo "[WARN] Docker CLI hoặc socket không sẵn trong container."
+  echo
+  echo "→ Hãy chạy trên HOST (không phải trong container) các lệnh sau:"
+  echo "docker commit \$(docker ps -qf name=\$(hostname)) ${IMAGE_NAME} || docker commit \$(docker ps -q | head -n1) ${IMAGE_NAME}"
+  echo "docker stop \$(docker ps -qf name=\$(hostname)) || true"
+  echo "docker rm   \$(docker ps -aqf name=\$(hostname)) || true"
+  if [ \"$USE_HOST_NET\" = \"1\" ]; then
+    echo "docker run -d --name ${CONTAINER_NAME} --network host --restart unless-stopped ${IMAGE_NAME} \\"
+    echo "  bash -lc \"/usr/local/bin/start-vnc.sh && /usr/local/bin/start-rdp.sh && tail -f /dev/null\""
+  else
+    echo "docker run -d --name ${CONTAINER_NAME} -p ${VNC_PORT}:${VNC_PORT} -p ${RDP_PORT}:${RDP_PORT} --restart unless-stopped ${IMAGE_NAME} \\"
+    echo "  bash -lc \"/usr/local/bin/start-vnc.sh && /usr/local/bin/start-rdp.sh && tail -f /dev/null\""
+  fi
+  exit 0
+fi
+
+# Có docker CLI + socket: thử tự động
+CID_CANDIDATE="$(hostname || true)"
+CID="$(docker ps -qf "id=${CID_CANDIDATE}" | head -n1 || true)"
+[ -z "$CID" ] && CID="$(docker ps -qf "name=${CID_CANDIDATE}" | head -n1 || true)"
+[ -z "$CID" ] && CID="$(docker ps -q | head -n1 || true)"
+
+if [ -z "$CID" ]; then
+  echo "[ERROR] Không xác định được CONTAINER_ID đang chạy."
+  exit 1
+fi
+
+echo "[STEP] Commit container -> ${IMAGE_NAME}"
+docker commit "$CID" "${IMAGE_NAME}"
+
+echo "[STEP] Stop & remove current container"
+docker stop "$CID" || true
+docker rm "$CID"   || true
+
+echo "[STEP] Run new container (${CONTAINER_NAME})"
+if [ "$USE_HOST_NET" = "1" ]; then
+  docker run -d --name "${CONTAINER_NAME}" --network host --restart unless-stopped "${IMAGE_NAME}" \
+    bash -lc "/usr/local/bin/start-vnc.sh && /usr/local/bin/start-rdp.sh && tail -f /dev/null"
+else
+  docker run -d --name "${CONTAINER_NAME}" -p "${VNC_PORT}:${VNC_PORT}" -p "${RDP_PORT}:${RDP_PORT}" --restart unless-stopped "${IMAGE_NAME}" \
+    bash -lc "/usr/local/bin/start-vnc.sh && /usr/local/bin/start-rdp.sh && tail -f /dev/null"
+fi
+
+echo "✅ Done. Kết nối từ HOST:"
+if [ "$USE_HOST_NET" = "1" ]; then
+  echo "  VNC: <HOST_IP>:${VNC_PORT}"
+  echo "  RDP: <HOST_IP>:${RDP_PORT}"
+else
+  echo "  VNC: localhost:${VNC_PORT}"
+  echo "  RDP: localhost:${RDP_PORT}"
+fi
+XEOF
+chmod +x /usr/local/bin/docker-relaunch.sh
+
 # ================== Autostart & connect info ==================
 /usr/local/bin/start-vnc.sh || true
 /usr/local/bin/start-rdp.sh || true
@@ -269,15 +335,19 @@ echo "RDP:"
 echo "  Connect to ${CONTAINER_IP}:${RDP_PORT}  (or <HOST_IP>:${RDP_PORT})"
 echo "  Login: lt4c / lt4c   (hoặc user container của bạn)"
 echo
-echo "NOTE (Docker): publish ports khi chạy container:"
-echo "  docker run -p ${VNC_PORT}:${VNC_PORT} -p ${RDP_PORT}:${RDP_PORT} <image>"
+echo "NOTE (Docker): để kết nối từ HOST, hãy publish port khi chạy container,"
+echo "hoặc dùng helper này (bên trong container):"
+echo "  /usr/local/bin/docker-relaunch.sh"
+echo "Có thể tự động relaunch ngay nếu socket Docker có sẵn:"
+echo "  DOCKER_RELAUNCH=1 /usr/local/bin/docker-relaunch.sh           # dùng -p"
+echo "  USE_HOST_NET=1 DOCKER_RELAUNCH=1 /usr/local/bin/docker-relaunch.sh  # dùng --network host"
 echo "================================================"
 
-# In trạng thái port để bạn kiểm tra ngay
+# In trạng thái port để kiểm tra ngay
 echo "[CHECK] Listening ports (expect :5901 & :3389):"
 (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep -E ':(5901|3389)' || true
 EOF
 
-# PHÂN QUYỀN VÀ CHẠY NGAY
+# PHÂN QUYỀN & CHẠY NGAY
 chmod +x bootstrap_desktop_rdp_vnc.sh
 bash bootstrap_desktop_rdp_vnc.sh
