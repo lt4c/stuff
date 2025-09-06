@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =========================
-# LT4C — Ubuntu/Debian RDP+VNC setup (NO systemctl)
+# LT4C — Ubuntu/Debian RDP+VNC setup (NO systemctl) + Steam via .deb
 # =========================
 # ENV overrideable
 USER_NAME="${USER_NAME:-lt4c}"
@@ -40,10 +40,27 @@ export DEBIAN_FRONTEND=noninteractive
 apt update
 apt -y upgrade
 apt -y install xfce4 xfce4-goodies xrdp xorgxrdp tigervnc-standalone-server tigervnc-common dbus-x11 x11-xserver-utils
-apt -y install curl wget net-tools htop unzip
+apt -y install curl wget net-tools htop unzip ca-certificates gnupg
 apt -y install chromium-browser || apt -y install chromium || true
-apt -y install steam || apt -y install steam-installer || true
 apt -y install cron || true
+
+# --- Steam via official .deb (handles better than apt on minimal servers)
+echo "[STEP] Enable i386 & install Steam (.deb)"
+if ! dpkg --print-architecture | grep -q '^amd64$'; then
+  echo "[WARN] Non-amd64 host; Steam may not be supported."
+fi
+dpkg --add-architecture i386 || true
+apt update
+# Minimal 32-bit GL runtime (helps headless/minimal images)
+apt -y install libc6:i386 libgl1:i386 libgl1-mesa-dri:i386 || true
+STEAM_DEB="/tmp/steam_latest.deb"
+wget -O "$STEAM_DEB" https://cdn.cloudflare.steamstatic.com/client/installer/steam.deb
+# Prefer apt to resolve deps automatically; fallback to dpkg if needed
+if ! apt -y install "$STEAM_DEB"; then
+  dpkg -i "$STEAM_DEB" || true
+  apt -yf install || true
+fi
+rm -f "$STEAM_DEB"
 
 # --- XRDP config (no systemctl)
 echo "[STEP] Configure XRDP"
@@ -185,7 +202,6 @@ fi
 # --- Autostart on boot via cron (@reboot), no systemd
 if command -v crontab >/dev/null 2>&1; then
   echo "[STEP] Install @reboot cron"
-  # keep any existing crontab; add or replace our line
   TMPCRON="$(mktemp)"
   crontab -l 2>/dev/null | sed '/lt4c_start_rdp_vnc.sh/d' > "$TMPCRON" || true
   echo "@reboot $START_SH >> ${LOGDIR}/lt4c_boot.log 2>&1" >> "$TMPCRON"
