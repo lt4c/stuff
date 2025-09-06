@@ -10,11 +10,18 @@ DISPLAY_NUM_DEFAULT="${DISPLAY_NUM:-1}"     # VNC :1 -> TCP 5901
 echo "[STEP] Update & install packages"
 export DEBIAN_FRONTEND=noninteractive
 apt update
-apt -y install xfce4 xfce4-goodies tigervnc-standalone-server dbus-x11 x11-xserver-utils xterm xrdp xorgxrdp curl wget chromium-browser || true
+apt -y install xfce4 xfce4-goodies tigervnc-standalone-server dbus-x11 x11-xserver-utils xterm xrdp xorgxrdp net-tools curl wget chromium-browser || true
 
 # --- Prepare DBus runtime (no systemd) ---
 mkdir -p /run/dbus
 chmod 755 /run/dbus || true
+
+# --- Allow Xorg in container (Xwrapper) ---
+if [ -f /etc/X11/Xwrapper.config ]; then
+  sed -i 's/^allowed_users=.*/allowed_users=anybody/' /etc/X11/Xwrapper.config || true
+else
+  printf "allowed_users=anybody\nneeds_root_rights=yes\n" > /etc/X11/Xwrapper.config
+fi
 
 # --- Prepare VNC ---
 VNC_DIR="${HOME}/.vnc"
@@ -24,29 +31,28 @@ chmod 700 "${VNC_DIR}"
 printf '%s\n' "${VNC_PASS_DEFAULT}" | vncpasswd -f > "${VNC_DIR}/passwd"
 chmod 600 "${VNC_DIR}/passwd"
 
-cat > "${VNC_DIR}/xstartup" <<'EOF'
+cat > "${VNC_DIR}/xstartup" <<'XEOF'
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
 export XDG_SESSION_TYPE=x11
 export DISPLAY=${DISPLAY:-:1}
 [ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
-# launch session-bus (not system bus)
 if command -v dbus-launch >/dev/null 2>&1; then
   eval "$(dbus-launch --sh-syntax)"
 fi
 exec startxfce4
-EOF
+XEOF
 chmod +x "${VNC_DIR}/xstartup"
 
 # --- XFCE for RDP ---
 echo "startxfce4" > ~/.xsession
 chmod +x ~/.xsession
 
-# --- Create start/stop scripts ---
+# --- Create helper scripts ---
 
-# Start VNC (prints container/public IPs)
-tee /usr/local/bin/start-vnc.sh >/dev/null <<'EOF'
+# Start VNC
+tee /usr/local/bin/start-vnc.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 VNC_PASS="${VNC_PASS:-lt4c}"
@@ -54,21 +60,20 @@ GEOM="${GEOM:-1280x720}"
 DISPLAY_NUM="${DISPLAY_NUM:-1}"
 export DISPLAY=":${DISPLAY_NUM}"
 
-# IP info
 CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 PUBLIC_IP="$(curl -s --max-time 2 ifconfig.me || echo 'N/A')"
 VNC_PORT=$((5900 + DISPLAY_NUM))
 
-# Ensure DBus session possible
 mkdir -p /run/dbus && chmod 755 /run/dbus || true
-if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
-  dbus-daemon --system --fork || true
-fi
+pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
 
 printf '%s\n' "${VNC_PASS}" | vncpasswd -f > "${HOME}/.vnc/passwd"
 chmod 600 "${HOME}/.vnc/passwd"
 
 vncserver -kill "${DISPLAY}" >/dev/null 2>&1 || true
+rm -rf /tmp/.X11-unix /tmp/.X${DISPLAY_NUM}-lock || true
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
 echo "[INFO] Starting VNC server ${DISPLAY} (port ${VNC_PORT}) geometry ${GEOM}"
 vncserver "${DISPLAY}" -geometry "${GEOM}" -depth 24
 
@@ -85,14 +90,12 @@ VNC password: ${VNC_PASS}
 Display: ${DISPLAY}
 Geometry: ${GEOM}
 
-Note: If this is a Docker container, ensure you published the port:
-  docker run -p ${VNC_PORT}:${VNC_PORT} ...
 MSG
-EOF
+XEOF
 chmod +x /usr/local/bin/start-vnc.sh
 
 # Stop VNC
-tee /usr/local/bin/stop-vnc.sh >/dev/null <<'EOF'
+tee /usr/local/bin/stop-vnc.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 DISPLAY_NUM="${DISPLAY_NUM:-1}"
@@ -100,29 +103,23 @@ DISPLAY=":${DISPLAY_NUM}"
 echo "[INFO] Stopping VNC server ${DISPLAY}"
 vncserver -kill "${DISPLAY}" >/dev/null 2>&1 || true
 echo "✅ VNC stopped."
-EOF
+XEOF
 chmod +x /usr/local/bin/stop-vnc.sh
 
-# Start RDP (prints container/public IPs)
-tee /usr/local/bin/start-rdp.sh >/dev/null <<'EOF'
+# Start RDP
+tee /usr/local/bin/start-rdp.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ensure DBus runtime (no systemd)
 mkdir -p /run/dbus && chmod 755 /run/dbus || true
-if ! pgrep -x dbus-daemon >/dev/null 2>&1; then
-  dbus-daemon --system --fork || true
-fi
+pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
 
-# Restart XRDP processes cleanly
 pkill -f xrdp        >/dev/null 2>&1 || true
 pkill -f xrdp-sesman >/dev/null 2>&1 || true
-
 /usr/sbin/xrdp-sesman &
 sleep 1
 /usr/sbin/xrdp &
 
-# IP info
 CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 PUBLIC_IP="$(curl -s --max-time 2 ifconfig.me || echo 'N/A')"
 RDP_PORT=3389
@@ -138,52 +135,86 @@ Connect with Windows Remote Desktop (mstsc):
 
 Login with your container user (e.g., root) & its password.
 
-Note: If this is a Docker container, ensure you published the port:
-  docker run -p ${RDP_PORT}:${RDP_PORT} ...
 MSG
-EOF
+XEOF
 chmod +x /usr/local/bin/start-rdp.sh
 
 # Stop RDP
-tee /usr/local/bin/stop-rdp.sh >/dev/null <<'EOF'
+tee /usr/local/bin/stop-rdp.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 pkill -f xrdp        >/dev/null 2>&1 || true
 pkill -f xrdp-sesman >/dev/null 2>&1 || true
 echo "✅ XRDP stopped"
-EOF
+XEOF
 chmod +x /usr/local/bin/stop-rdp.sh
 
-# --- Desktop icon (Chromium, optional) ---
-DESK="$HOME/Desktop"
-mkdir -p "$DESK"
-tee "$DESK/Chromium.desktop" >/dev/null <<'EOF'
-[Desktop Entry]
-Type=Application
-Name=Chromium
-Exec=chromium %U
-Terminal=false
-Categories=Network;WebBrowser;
-Icon=chromium
-EOF
-chmod +x "$DESK/Chromium.desktop"
+# --- Diagnostic script ---
+tee /usr/local/bin/fix_rdp_vnc.sh >/dev/null <<'XEOF'
+#!/usr/bin/env bash
+set -euo pipefail
+LOG=/srv/lab
+mkdir -p "$LOG"
+exec > >(tee -a "$LOG/rdp_vnc_diag_$(date +%Y%m%d_%H%M%S).log") 2>&1
 
-# --- Save defaults (for convenience if you create wrappers later) ---
-echo "${VNC_PASS_DEFAULT}"    > /tmp/.vnc_pass_default
-echo "${GEOM_DEFAULT}"        > /tmp/.geom_default
-echo "${DISPLAY_NUM_DEFAULT}" > /tmp/.display_default
+echo "[STEP] Show IPs"
+echo "CONTAINER_IP: $(hostname -I 2>/dev/null | awk '{print $1}')"
+echo "PUBLIC_IP:    $(curl -s --max-time 2 ifconfig.me || echo N/A)"
+
+echo "[STEP] Ensure packages"
+apt update
+apt -y install xfce4 xfce4-goodies tigervnc-standalone-server xrdp xorgxrdp dbus-x11 x11-xserver-utils xterm net-tools curl wget
+
+echo "[STEP] DBus runtime"
+mkdir -p /run/dbus && chmod 755 /run/dbus
+pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
+
+echo "[STEP] Unblock Xorg"
+if [ -f /etc/X11/Xwrapper.config ]; then
+  sed -i 's/^allowed_users=.*/allowed_users=anybody/' /etc/X11/Xwrapper.config || true
+else
+  printf "allowed_users=anybody\nneeds_root_rights=yes\n" > /etc/X11/Xwrapper.config
+fi
+
+echo "[STEP] Restart services"
+vncserver -kill :1 >/dev/null 2>&1 || true
+rm -rf /tmp/.X11-unix /tmp/.X1-lock || true
+mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+vncserver :1 -geometry 1280x720 -depth 24
+/usr/sbin/xrdp-sesman &
+sleep 1
+/usr/sbin/xrdp &
+
+echo "[STEP] Ports"
+(ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null || true) | tee "$LOG/ports.txt"
+
+echo "[DONE] Check logs in $LOG"
+XEOF
+chmod +x /usr/local/bin/fix_rdp_vnc.sh
+
+# --- Autostart ---
+/usr/local/bin/start-vnc.sh || true
+/usr/local/bin/start-rdp.sh || true
+
+# --- Show connection info ---
+CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+PUBLIC_IP="$(curl -s --max-time 2 ifconfig.me || echo 'N/A')"
+VNC_PORT="$((5900 + DISPLAY_NUM_DEFAULT))"
+RDP_PORT="3389"
 
 echo
-echo "====================================================="
-echo "✅ Setup complete!"
+echo "================= CONNECT INFO ================="
+echo "Container IP : ${CONTAINER_IP}"
+echo "Public IP    : ${PUBLIC_IP}"
+echo
 echo "VNC:"
-echo "   start-vnc.sh   (connect to port 5901 by default, pass=${VNC_PASS_DEFAULT})"
-echo "   stop-vnc.sh"
+echo "  Connect to ${CONTAINER_IP}:${VNC_PORT}  (or <HOST_IP>:${VNC_PORT})"
+echo "  Password: ${VNC_PASS_DEFAULT}"
 echo
 echo "RDP:"
-echo "   start-rdp.sh   (connect with mstsc to port 3389, login with container user)"
-echo "   stop-rdp.sh"
+echo "  Connect to ${CONTAINER_IP}:${RDP_PORT}  (or <HOST_IP>:${RDP_PORT})"
+echo "  Login: container user (e.g., root) + its password"
 echo
-echo "Remember to publish ports from container if needed:"
-echo "   docker run -p 5901:5901 -p 3389:3389 ..."
-echo "====================================================="
+echo "NOTE: If Docker, run with:"
+echo "  docker run -p ${VNC_PORT}:${VNC_PORT} -p ${RDP_PORT}:${RDP_PORT} ..."
+echo "================================================="
