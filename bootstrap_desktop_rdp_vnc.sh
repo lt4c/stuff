@@ -1,19 +1,26 @@
+# TẠO FILE
 cat > bootstrap_desktop_rdp_vnc.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ==== Default config (có thể override qua ENV khi start-vnc.sh) ====
+# ==== Default config (override qua ENV nếu muốn) ====
 VNC_PASS_DEFAULT="${VNC_PASS:-lt4c}"
 GEOM_DEFAULT="${GEOM:-1280x720}"
 DISPLAY_NUM_DEFAULT="${DISPLAY_NUM:-1}"     # VNC :1 -> TCP 5901
-# ===================================================================
+# ====================================================
 
 echo "[STEP] Update & install packages"
 export DEBIAN_FRONTEND=noninteractive
 apt update
-apt -y install xfce4 xfce4-goodies tigervnc-standalone-server dbus-x11 x11-xserver-utils xterm xrdp xorgxrdp net-tools curl wget chromium-browser || true
+apt -y install \
+  xfce4 xfce4-goodies \
+  tigervnc-standalone-server \
+  xrdp xorgxrdp \
+  dbus-x11 x11-xserver-utils xterm \
+  net-tools curl wget ca-certificates \
+  chromium-browser || true
 
-# --- Ensure login user for RDP ---
+# --- Ensure login user for RDP (mstsc) ---
 if id -u lt4c >/dev/null 2>&1; then
   echo "lt4c:lt4c" | chpasswd
 else
@@ -25,6 +32,7 @@ echo "[INFO] User 'lt4c' ready (password: lt4c)"
 # --- Prepare DBus runtime (no systemd) ---
 mkdir -p /run/dbus
 chmod 755 /run/dbus || true
+pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
 
 # --- Allow Xorg in container (Xwrapper) ---
 if [ -f /etc/X11/Xwrapper.config ]; then
@@ -60,7 +68,7 @@ chmod +x ~/.xsession
 
 # ================== Helper scripts ==================
 
-# Start VNC (bind public; -localhost no)
+# Start VNC (bind public; -localhost no; in IPs; port check)
 tee /usr/local/bin/start-vnc.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -86,6 +94,9 @@ mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
 
 echo "[INFO] Starting VNC server ${DISPLAY} (port ${VNC_PORT}) geometry ${GEOM} -localhost no"
 vncserver "${DISPLAY}" -geometry "${GEOM}" -depth 24 -localhost no
+
+echo "[CHECK] VNC listening ports:"
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep ":${VNC_PORT}" || true
 
 cat <<MSG
 
@@ -115,7 +126,7 @@ echo "✅ VNC stopped."
 XEOF
 chmod +x /usr/local/bin/stop-vnc.sh
 
-# Start RDP
+# Start RDP (clean pid; in IPs; port check)
 tee /usr/local/bin/start-rdp.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -123,15 +134,20 @@ set -euo pipefail
 mkdir -p /run/dbus && chmod 755 /run/dbus || true
 pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
 
+# Clean stale PID files then (re)start
+rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/sesman.pid /var/run/xrdp/xrdp-sesman.pid 2>/dev/null || true
 pkill -f xrdp        >/dev/null 2>&1 || true
 pkill -f xrdp-sesman >/dev/null 2>&1 || true
 /usr/sbin/xrdp-sesman &
 sleep 1
 /usr/sbin/xrdp &
 
+RDP_PORT=3389
+echo "[CHECK] RDP listening ports:"
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep ":${RDP_PORT}" || true
+
 CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 PUBLIC_IP="$(curl -s --max-time 2 ifconfig.me || echo 'N/A')"
-RDP_PORT=3389
 
 cat <<MSG
 
@@ -251,10 +267,17 @@ echo "  Password: ${VNC_PASS_DEFAULT}"
 echo
 echo "RDP:"
 echo "  Connect to ${CONTAINER_IP}:${RDP_PORT}  (or <HOST_IP>:${RDP_PORT})"
-echo "  Login: lt4c / lt4c   (or your container user/password)"
+echo "  Login: lt4c / lt4c   (hoặc user container của bạn)"
 echo
-echo "NOTE (Docker): publish ports when running container:"
+echo "NOTE (Docker): publish ports khi chạy container:"
 echo "  docker run -p ${VNC_PORT}:${VNC_PORT} -p ${RDP_PORT}:${RDP_PORT} <image>"
-echo "================================================="
+echo "================================================"
+
+# In trạng thái port để bạn kiểm tra ngay
+echo "[CHECK] Listening ports (expect :5901 & :3389):"
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep -E ':(5901|3389)' || true
 EOF
+
+# PHÂN QUYỀN VÀ CHẠY NGAY
 chmod +x bootstrap_desktop_rdp_vnc.sh
+bash bootstrap_desktop_rdp_vnc.sh
