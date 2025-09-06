@@ -10,7 +10,7 @@ USER_PASS="${USER_PASS:-lt4c}"
 VNC_PASS="${VNC_PASS:-lt4c}"
 GEOM="${GEOM:-1280x720}"
 XRDP_COLOR_BPP="${XRDP_COLOR_BPP:-32}"   # 24 hoặc 32
-DISPLAY_NUM="${DISPLAY_NUM:-1}"          # VNC :1 -> TCP 5901
+DISPLAY_NUM="${DISPLAY_NUM:-0}"
 
 LOGDIR="/srv/lab"
 mkdir -p "$LOGDIR"
