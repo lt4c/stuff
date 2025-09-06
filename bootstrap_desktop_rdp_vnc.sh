@@ -1,13 +1,33 @@
-# GHI ĐÈ FILE (đã gồm toàn bộ setup RDP/VNC + docker relaunch helper)
+# GHI ĐÈ FILE (bản không Docker, có mở tường lửa)
 cat > bootstrap_desktop_rdp_vnc.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ==== Default config (override qua ENV nếu muốn) ====
+# ==== Config mặc định (có thể override khi start) ====
 VNC_PASS_DEFAULT="${VNC_PASS:-lt4c}"
 GEOM_DEFAULT="${GEOM:-1280x720}"
-DISPLAY_NUM_DEFAULT="${DISPLAY_NUM:-1}"     # VNC :1 -> TCP 5901
-# ====================================================
+DISPLAY_NUM_DEFAULT="${DISPLAY_NUM:-1}"    # :1 -> 5901
+RDP_PORT=3389
+# =====================================================
+
+# --- Helper: mở firewall nếu có ---
+open_firewall() {
+  local PORT="$1"
+  # UFW
+  if command -v ufw >/dev/null 2>&1; then
+    (sudo ufw status | grep -qi inactive) || sudo ufw allow "${PORT}"/tcp || true
+  fi
+  # firewalld
+  if command -v firewall-cmd >/dev/null 2>&1; then
+    sudo firewall-cmd --permanent --add-port="${PORT}"/tcp >/dev/null 2>&1 || true
+    sudo firewall-cmd --reload >/dev/null 2>&1 || true
+  fi
+  # iptables (fallback)
+  if command -v iptables >/dev/null 2>&1; then
+    sudo iptables -C INPUT -p tcp --dport "${PORT}" -j ACCEPT 2>/dev/null || \
+    sudo iptables -I INPUT -p tcp --dport "${PORT}" -j ACCEPT || true
+  fi
+}
 
 echo "[STEP] Update & install packages"
 export DEBIAN_FRONTEND=noninteractive
@@ -20,7 +40,7 @@ apt -y install \
   net-tools curl wget ca-certificates \
   chromium-browser || true
 
-# --- Ensure login user for RDP (mstsc) ---
+# --- Tạo user đăng nhập RDP (nếu cần) ---
 if id -u lt4c >/dev/null 2>&1; then
   echo "lt4c:lt4c" | chpasswd
 else
@@ -29,19 +49,19 @@ else
 fi
 echo "[INFO] User 'lt4c' ready (password: lt4c)"
 
-# --- Prepare DBus runtime (no systemd) ---
+# --- DBus (no systemd) ---
 mkdir -p /run/dbus
 chmod 755 /run/dbus || true
 pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
 
-# --- Allow Xorg in container (Xwrapper) ---
+# --- Cho phép Xorg trong container/host tối giản ---
 if [ -f /etc/X11/Xwrapper.config ]; then
   sed -i 's/^allowed_users=.*/allowed_users=anybody/' /etc/X11/Xwrapper.config || true
 else
   printf "allowed_users=anybody\nneeds_root_rights=yes\n" > /etc/X11/Xwrapper.config
 fi
 
-# --- Prepare VNC (password + xstartup) ---
+# --- VNC setup ---
 VNC_DIR="${HOME}/.vnc"
 mkdir -p "${VNC_DIR}"
 chmod 700 "${VNC_DIR}"
@@ -62,13 +82,13 @@ exec startxfce4
 XEOF
 chmod +x "${VNC_DIR}/xstartup"
 
-# --- XFCE session for RDP ---
+# --- XFCE session cho RDP ---
 echo "startxfce4" > ~/.xsession
 chmod +x ~/.xsession
 
-# ================== Helper scripts ==================
+# ================== Scripts tiện ích ==================
 
-# Start VNC (bind public; -localhost no; in IPs; port check)
+# Start VNC (mở firewall, -localhost no)
 tee /usr/local/bin/start-vnc.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -76,40 +96,49 @@ VNC_PASS="${VNC_PASS:-lt4c}"
 GEOM="${GEOM:-1280x720}"
 DISPLAY_NUM="${DISPLAY_NUM:-1}"
 export DISPLAY=":${DISPLAY_NUM}"
-
-CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-PUBLIC_IP="$(curl -s --max-time 2 ifconfig.me || echo 'N/A')"
 VNC_PORT=$((5900 + DISPLAY_NUM))
 
+# DBus
 mkdir -p /run/dbus && chmod 755 /run/dbus || true
 pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
 
+# Password đảm bảo
 printf '%s\n' "${VNC_PASS}" | vncpasswd -f > "${HOME}/.vnc/passwd"
 chmod 600 "${HOME}/.vnc/passwd"
 
-# Clean stale locks, then start with -localhost no
+# Dọn lock và start (bind public)
 vncserver -kill "${DISPLAY}" >/dev/null 2>&1 || true
 rm -rf /tmp/.X11-unix /tmp/.X${DISPLAY_NUM}-lock || true
 mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
-
-echo "[INFO] Starting VNC server ${DISPLAY} (port ${VNC_PORT}) geometry ${GEOM} -localhost no"
 vncserver "${DISPLAY}" -geometry "${GEOM}" -depth 24 -localhost no
 
-echo "[CHECK] VNC listening ports:"
-(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep ":${VNC_PORT}" || true
+# Mở firewall
+if command -v ufw >/dev/null 2>&1; then
+  (ufw status | grep -qi inactive) || ufw allow "${VNC_PORT}"/tcp || true
+fi
+if command -v firewall-cmd >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-port="${VNC_PORT}"/tcp >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+if command -v iptables >/dev/null 2>&1; then
+  iptables -C INPUT -p tcp --dport "${VNC_PORT}" -j ACCEPT 2>/dev/null || \
+  iptables -I INPUT -p tcp --dport "${VNC_PORT}" -j ACCEPT || true
+fi
 
+# Thông tin
+CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+PUBLIC_IP="$(curl -s --max-time 3 ifconfig.me || echo 'N/A')"
+echo "[CHECK] VNC listening:"
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep ":${VNC_PORT}" || true
 cat <<MSG
 
-✅ VNC is running.
+✅ VNC is running on port ${VNC_PORT} (display ${DISPLAY}) with -localhost no
 
-Connect with a VNC client:
-  - Same network (container bridge): ${CONTAINER_IP}:${VNC_PORT}
-  - Via published port on host:       <HOST_IP>:${VNC_PORT}
-  - Public IP (if routed):            ${PUBLIC_IP}:${VNC_PORT}
-
-VNC password: ${VNC_PASS}
-Display: ${DISPLAY}
-Geometry: ${GEOM}
+Connect:
+  - LAN/Internal:  ${CONTAINER_IP}:${VNC_PORT}
+  - Public (if open): ${PUBLIC_IP}:${VNC_PORT}
+Password: ${VNC_PASS}
+Resolution: ${GEOM}
 MSG
 XEOF
 chmod +x /usr/local/bin/start-vnc.sh
@@ -119,48 +148,69 @@ tee /usr/local/bin/stop-vnc.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
 DISPLAY_NUM="${DISPLAY_NUM:-1}"
-DISPLAY=":${DISPLAY_NUM}"
-echo "[INFO] Stopping VNC server ${DISPLAY}"
-vncserver -kill "${DISPLAY}" >/dev/null 2>&1 || true
+vncserver -kill ":${DISPLAY_NUM}" >/dev/null 2>&1 || true
 echo "✅ VNC stopped."
 XEOF
 chmod +x /usr/local/bin/stop-vnc.sh
 
-# Start RDP (clean pid; in IPs; port check)
+# Start RDP (mở firewall, đảm bảo PID/log/key)
 tee /usr/local/bin/start-rdp.sh >/dev/null <<'XEOF'
 #!/usr/bin/env bash
 set -euo pipefail
+RDP_PORT=3389
 
+# DBus
 mkdir -p /run/dbus && chmod 755 /run/dbus || true
 pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
 
-# Clean stale PID files then (re)start
+# Run dirs & perms
+mkdir -p /var/run/xrdp /var/log/xrdp
+chown xrdp:xrdp /var/run/xrdp 2>/dev/null || true
+chown xrdp:adm  /var/log/xrdp 2>/dev/null || true
+chmod 755 /var/run/xrdp /var/log/xrdp || true
+
+# RSA keys nếu thiếu
+if [ ! -f /etc/xrdp/rsakeys.ini ]; then
+  xrdp-keygen xrdp /etc/xrdp/rsakeys.ini || true
+  chown xrdp:xrdp /etc/xrdp/rsakeys.ini 2>/dev/null || true
+  chmod 600 /etc/xrdp/rsakeys.ini 2>/dev/null || true
+fi
+
+# Clean & start
 rm -f /var/run/xrdp/xrdp.pid /var/run/xrdp/sesman.pid /var/run/xrdp/xrdp-sesman.pid 2>/dev/null || true
 pkill -f xrdp        >/dev/null 2>&1 || true
 pkill -f xrdp-sesman >/dev/null 2>&1 || true
 /usr/sbin/xrdp-sesman &
 sleep 1
-/usr/sbin/xrdp &
+/usr/sbin/xrdp --nodaemon &> /var/log/xrdp/xrdp-foreground.log &
+sleep 1
 
-RDP_PORT=3389
-echo "[CHECK] RDP listening ports:"
-(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep ":${RDP_PORT}" || true
+# Mở firewall
+if command -v ufw >/dev/null 2>&1; then
+  (ufw status | grep -qi inactive) || ufw allow "${RDP_PORT}"/tcp || true
+fi
+if command -v firewall-cmd >/dev/null 2>&1; then
+  firewall-cmd --permanent --add-port="${RDP_PORT}"/tcp >/dev/null 2>&1 || true
+  firewall-cmd --reload >/dev/null 2>&1 || true
+fi
+if command -v iptables >/dev/null 2>&1; then
+  iptables -C INPUT -p tcp --dport "${RDP_PORT}" -j ACCEPT 2>/dev/null || \
+  iptables -I INPUT -p tcp --dport "${RDP_PORT}" -j ACCEPT || true
+fi
 
+# Info
 CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-PUBLIC_IP="$(curl -s --max-time 2 ifconfig.me || echo 'N/A')"
-
+PUBLIC_IP="$(curl -s --max-time 3 ifconfig.me || echo 'N/A')"
+echo "[CHECK] RDP listening:"
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep ":${RDP_PORT}" || true
 cat <<MSG
 
-✅ XRDP is running on port ${RDP_PORT}.
+✅ XRDP should be running on port ${RDP_PORT}.
 
-Connect with Windows Remote Desktop (mstsc):
-  - Same network (container bridge): ${CONTAINER_IP}:${RDP_PORT}
-  - Via published port on host:       <HOST_IP>:${RDP_PORT}
-  - Public IP (if routed):            ${PUBLIC_IP}:${RDP_PORT}
-
-Login example:
-  user: lt4c
-  pass: lt4c
+Connect (mstsc):
+  - LAN/Internal:  ${CONTAINER_IP}:${RDP_PORT}
+  - Public (if open): ${PUBLIC_IP}:${RDP_PORT}
+Login: lt4c / lt4c  (hoặc user của bạn)
 MSG
 XEOF
 chmod +x /usr/local/bin/start-rdp.sh
@@ -175,179 +225,29 @@ echo "✅ XRDP stopped"
 XEOF
 chmod +x /usr/local/bin/stop-rdp.sh
 
-# Diagnostic & auto-fix on demand
-tee /usr/local/bin/fix_rdp_vnc.sh >/dev/null <<'XEOF'
-#!/usr/bin/env bash
-set -euo pipefail
-LOG=/srv/lab
-mkdir -p "$LOG"
-exec > >(tee -a "$LOG/rdp_vnc_diag_$(date +%Y%m%d_%H%M%S).log") 2>&1
-
-echo "[STEP] IPs"
-echo "CONTAINER_IP: $(hostname -I 2>/dev/null | awk '{print $1}')"
-echo "PUBLIC_IP:    $(curl -s --max-time 2 ifconfig.me || echo N/A)"
-
-echo "[STEP] Ensure packages"
-apt update
-apt -y install xfce4 xfce4-goodies tigervnc-standalone-server xrdp xorgxrdp dbus-x11 x11-xserver-utils xterm net-tools curl wget
-
-echo "[STEP] DBus runtime"
-mkdir -p /run/dbus && chmod 755 /run/dbus
-pgrep -x dbus-daemon >/dev/null 2>&1 || dbus-daemon --system --fork || true
-
-echo "[STEP] Unblock Xorg"
-if [ -f /etc/X11/Xwrapper.config ]; then
-  sed -i 's/^allowed_users=.*/allowed_users=anybody/' /etc/X11/Xwrapper.config || true
-else
-  printf "allowed_users=anybody\nneeds_root_rights=yes\n" > /etc/X11/Xwrapper.config
-fi
-
-echo "[STEP] VNC config"
-mkdir -p ~/.vnc
-printf '%s\n' "${VNC_PASS:-lt4c}" | vncpasswd -f > ~/.vnc/passwd
-chmod 600 ~/.vnc/passwd
-cat > ~/.vnc/xstartup <<'EOF2'
-#!/bin/sh
-unset SESSION_MANAGER
-unset DBUS_SESSION_BUS_ADDRESS
-export XDG_SESSION_TYPE=x11
-export DISPLAY=${DISPLAY:-:1}
-[ -r "$HOME/.Xresources" ] && xrdb "$HOME/.Xresources"
-if command -v dbus-launch >/dev/null 2>&1; then
-  eval "$(dbus-launch --sh-syntax)"
-fi
-exec startxfce4
-EOF2
-chmod +x ~/.vnc/xstartup
-
-echo "[STEP] RDP XFCE session"
-echo "startxfce4" > ~/.xsession && chmod +x ~/.xsession
-
-echo "[STEP] Clean locks"
-vncserver -kill :1 >/dev/null 2>&1 || true
-rm -rf /tmp/.X11-unix /tmp/.X1-lock || true
-mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
-
-echo "[STEP] Start VNC (:1 -> 5901) -localhost no"
-vncserver :1 -geometry 1280x720 -depth 24 -localhost no
-
-echo "[STEP] Start XRDP"
-pkill -f xrdp       >/dev/null 2>&1 || true
-pkill -f xrdp-sesman>/dev/null 2>&1 || true
-/usr/sbin/xrdp-sesman &
-sleep 1
-/usr/sbin/xrdp &
-
-echo "[STEP] Listening ports"
-(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | tee "$LOG/ports.txt"
-
-echo "[DONE] Logs:"
-echo "  VNC: ~/.vnc/*:1.log"
-echo "  XRDP: /var/log/xrdp.log, /var/log/xrdp-sesman.log"
-XEOF
-chmod +x /usr/local/bin/fix_rdp_vnc.sh
-
-# ================== Docker relaunch helper ==================
-tee /usr/local/bin/docker-relaunch.sh >/dev/null <<'XEOF'
-#!/usr/bin/env bash
-set -euo pipefail
-IMAGE_NAME="${RDPVNC_IMAGE:-rdpvnc:latest}"
-CONTAINER_NAME="${RDPVNC_NAME:-rdpvnc}"
-USE_HOST_NET="${USE_HOST_NET:-0}"   # 1 = --network host, else -p ports
-RDP_PORT="${RDP_PORT:-3389}"
-VNC_PORT="${VNC_PORT:-5901}"
-
-echo "[INFO] Docker relaunch helper"
-if ! command -v docker >/dev/null 2>&1 || [ ! -S /var/run/docker.sock ]; then
-  echo "[WARN] Docker CLI hoặc socket không sẵn trong container."
-  echo
-  echo "→ Hãy chạy trên HOST (không phải trong container) các lệnh sau:"
-  echo "docker commit \$(docker ps -qf name=\$(hostname)) ${IMAGE_NAME} || docker commit \$(docker ps -q | head -n1) ${IMAGE_NAME}"
-  echo "docker stop \$(docker ps -qf name=\$(hostname)) || true"
-  echo "docker rm   \$(docker ps -aqf name=\$(hostname)) || true"
-  if [ \"$USE_HOST_NET\" = \"1\" ]; then
-    echo "docker run -d --name ${CONTAINER_NAME} --network host --restart unless-stopped ${IMAGE_NAME} \\"
-    echo "  bash -lc \"/usr/local/bin/start-vnc.sh && /usr/local/bin/start-rdp.sh && tail -f /dev/null\""
-  else
-    echo "docker run -d --name ${CONTAINER_NAME} -p ${VNC_PORT}:${VNC_PORT} -p ${RDP_PORT}:${RDP_PORT} --restart unless-stopped ${IMAGE_NAME} \\"
-    echo "  bash -lc \"/usr/local/bin/start-vnc.sh && /usr/local/bin/start-rdp.sh && tail -f /dev/null\""
-  fi
-  exit 0
-fi
-
-# Có docker CLI + socket: thử tự động
-CID_CANDIDATE="$(hostname || true)"
-CID="$(docker ps -qf "id=${CID_CANDIDATE}" | head -n1 || true)"
-[ -z "$CID" ] && CID="$(docker ps -qf "name=${CID_CANDIDATE}" | head -n1 || true)"
-[ -z "$CID" ] && CID="$(docker ps -q | head -n1 || true)"
-
-if [ -z "$CID" ]; then
-  echo "[ERROR] Không xác định được CONTAINER_ID đang chạy."
-  exit 1
-fi
-
-echo "[STEP] Commit container -> ${IMAGE_NAME}"
-docker commit "$CID" "${IMAGE_NAME}"
-
-echo "[STEP] Stop & remove current container"
-docker stop "$CID" || true
-docker rm "$CID"   || true
-
-echo "[STEP] Run new container (${CONTAINER_NAME})"
-if [ "$USE_HOST_NET" = "1" ]; then
-  docker run -d --name "${CONTAINER_NAME}" --network host --restart unless-stopped "${IMAGE_NAME}" \
-    bash -lc "/usr/local/bin/start-vnc.sh && /usr/local/bin/start-rdp.sh && tail -f /dev/null"
-else
-  docker run -d --name "${CONTAINER_NAME}" -p "${VNC_PORT}:${VNC_PORT}" -p "${RDP_PORT}:${RDP_PORT}" --restart unless-stopped "${IMAGE_NAME}" \
-    bash -lc "/usr/local/bin/start-vnc.sh && /usr/local/bin/start-rdp.sh && tail -f /dev/null"
-fi
-
-echo "✅ Done. Kết nối từ HOST:"
-if [ "$USE_HOST_NET" = "1" ]; then
-  echo "  VNC: <HOST_IP>:${VNC_PORT}"
-  echo "  RDP: <HOST_IP>:${RDP_PORT}"
-else
-  echo "  VNC: localhost:${VNC_PORT}"
-  echo "  RDP: localhost:${RDP_PORT}"
-fi
-XEOF
-chmod +x /usr/local/bin/docker-relaunch.sh
-
-# ================== Autostart & connect info ==================
+# ================== Autostart + mở cổng public ==================
 /usr/local/bin/start-vnc.sh || true
 /usr/local/bin/start-rdp.sh || true
 
-CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-PUBLIC_IP="$(curl -s --max-time 2 ifconfig.me || echo 'N/A')"
-VNC_PORT="$((5900 + DISPLAY_NUM_DEFAULT))"
-RDP_PORT="3389"
+# Mở firewall cấp hệ thống (nếu có)
+open_firewall $((5900 + DISPLAY_NUM_DEFAULT))
+open_firewall "${RDP_PORT}"
 
+# Thông tin kết nối
+CONTAINER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+PUBLIC_IP="$(curl -s --max-time 3 ifconfig.me || echo 'N/A')"
 echo
 echo "================= CONNECT INFO ================="
-echo "Container IP : ${CONTAINER_IP}"
-echo "Public IP    : ${PUBLIC_IP}"
+echo "Internal/LAN IP : ${CONTAINER_IP}"
+echo "Public IP       : ${PUBLIC_IP}"
 echo
-echo "VNC:"
-echo "  Connect to ${CONTAINER_IP}:${VNC_PORT}  (or <HOST_IP>:${VNC_PORT})"
-echo "  Password: ${VNC_PASS_DEFAULT}"
-echo
-echo "RDP:"
-echo "  Connect to ${CONTAINER_IP}:${RDP_PORT}  (or <HOST_IP>:${RDP_PORT})"
-echo "  Login: lt4c / lt4c   (hoặc user container của bạn)"
-echo
-echo "NOTE (Docker): để kết nối từ HOST, hãy publish port khi chạy container,"
-echo "hoặc dùng helper này (bên trong container):"
-echo "  /usr/local/bin/docker-relaunch.sh"
-echo "Có thể tự động relaunch ngay nếu socket Docker có sẵn:"
-echo "  DOCKER_RELAUNCH=1 /usr/local/bin/docker-relaunch.sh           # dùng -p"
-echo "  USE_HOST_NET=1 DOCKER_RELAUNCH=1 /usr/local/bin/docker-relaunch.sh  # dùng --network host"
+echo "VNC:  ${PUBLIC_IP}:$((5900 + DISPLAY_NUM_DEFAULT))  (pass: ${VNC_PASS_DEFAULT})"
+echo "RDP:  ${PUBLIC_IP}:${RDP_PORT}  (user/pass gợi ý: lt4c/lt4c)"
 echo "================================================"
-
-# In trạng thái port để kiểm tra ngay
-echo "[CHECK] Listening ports (expect :5901 & :3389):"
-(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep -E ':(5901|3389)' || true
+echo "[CHECK] Listening ports (expect :$((5900 + DISPLAY_NUM_DEFAULT)) & :${RDP_PORT}):"
+(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | grep -E ":(5901|${RDP_PORT})" || true
 EOF
 
-# PHÂN QUYỀN & CHẠY NGAY
 chmod +x bootstrap_desktop_rdp_vnc.sh
+# CHẠY LUÔN
 bash bootstrap_desktop_rdp_vnc.sh
