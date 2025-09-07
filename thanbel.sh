@@ -27,7 +27,7 @@ cat > /tmp/autopair.sh <<EOF
 SUNSHINE_HOST="$SUNSHINE_HOST"
 PIN="$PIN"
 
-# Chờ đến khi API Sunshine mở cổng
+# Chờ API Sunshine sẵn sàng
 until curl -fsS "http://\$SUNSHINE_HOST/api/state" >/dev/null 2>&1; do
   echo "[*] Waiting Sunshine at \$SUNSHINE_HOST..."
   sleep 2
@@ -48,8 +48,8 @@ done
 EOF
 chmod +x /tmp/autopair.sh
 
-echo "[*] Start tmux session..."
-tmux new-session -d -s lt4c \
+echo "[*] Start tmux session (lt4c-gpu)..."
+tmux new-session -d -s lt4c-gpu \
   "docker run --rm --gpus all \
     -p 47984:47984 -p 47989:47989 -p 47990:47990 -p 48010:48010 \
     -p 47998:47998/udp -p 47999:47999/udp -p 48000:48000/udp -p 48002:48002/udp \
