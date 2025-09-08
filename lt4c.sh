@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# lt4c_full_tigervnc_sunshine_autoapps_deb.sh (patched)
-# XFCE + XRDP (tuned) + TigerVNC (:0) + Sunshine Remote Play (.deb + auto-add apps) + Steam (Flatpak) + Chromium (Flatpak)
-# Tối ưu: tắt compositor XFCE, 16-bit RDP, nén, fastpath, tcp_low_latency, in IP + debug
-# Thêm: icon Desktop cho Steam, Moonlight (Sunshine Web UI), Chromium
+# lt4c_full_tigervnc_sunshine_autoapps_deb.sh (patched + input drivers)
+# XFCE + XRDP (tuned) + TigerVNC (:0) + Sunshine (.deb + auto-add apps) + Steam (Flatpak) + Chromium (Flatpak)
+# Added: Desktop icons (Steam, Moonlight/Sunshine UI, Chromium)
+# Added: Input stack for Moonlight (uinput + vgamepad DKMS) and permissions hardening
 
 set -Eeuo pipefail
 
@@ -216,41 +216,44 @@ systemctl daemon-reload
 systemctl enable --now sunshine >>"$LOG" 2>&1 || true
 
 # =================== Sunshine/Moonlight: enable virtual input (kb/mouse/gamepad) ===================
-step "7.1/11 Bật uinput + quyền truy cập thiết bị input cho Sunshine"
 
-# =================== Sunshine: cài ViGEmBus/vgamepad cho gamepad ảo ===================
-step "7.2/11 Cài Virtual Gamepad (ViGEmBus/vgamepad)"
+# =================== Sunshine as USER service (improves input injection reliability) ===================
+step "7.0b/11 Chuyển Sunshine sang user-service (systemd --user) + enable linger"
 
-# Yêu cầu build module kernel
-apt -y install dkms build-essential linux-headers-$(uname -r) git >>"$LOG" 2>&1 || true
+# Disable system-wide service to avoid seat/session issues
+systemctl disable --now sunshine >>"$LOG" 2>&1 || true
 
-# Cài vgamepad (kernel module) qua DKMS
-if ! lsmod | grep -q '^vgamepad'; then
-  TMP_VGP="/tmp/vgamepad_$(date +%s)"
-  rm -rf "$TMP_VGP"
-  git clone --depth=1 https://github.com/ViGEm/vgamepad.git "$TMP_VGP" >>"$LOG" 2>&1 || true
-  if [ -f "$TMP_VGP/dkms.conf" ] || [ -f "$TMP_VGP/Makefile" ]; then
-    # Chuẩn hoá version nếu có metadata
-    VGP_VER="$(grep -Eo 'PACKAGE_VERSION.?=.+' "$TMP_VGP/dkms.conf" 2>/dev/null | awk -F= '{print $2}' | tr -d ' \"' || echo 0.1)"
-    VGP_VER="${VGP_VER:-0.1}"
-    # Đặt vào /usr/src để dkms add
-    DEST="/usr/src/vgamepad-${VGP_VER}"
-    rm -rf "$DEST"
-    mkdir -p "$DEST"
-    cp -a "$TMP_VGP/"* "$DEST/"
-    dkms add "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
-    dkms build "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
-    dkms install "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
-  fi
-  modprobe vgamepad || true
-fi
+# Enable lingering so user services can run without interactive login
+loginctl enable-linger "${USER_NAME}" >>"$LOG" 2>&1 || true
 
-# Udev rules để Sunshine truy cập thiết bị
-cat >/etc/udev/rules.d/61-vgamepad.rules <<'EOF'
-KERNEL=="vgamepad*", MODE="0660", GROUP="input"
+# Create user unit
+USR_UNIT_DIR="/home/${USER_NAME}/.config/systemd/user"
+install -d -m 0755 -o "${USER_NAME}" -g "${USER_NAME}" "$USR_UNIT_DIR"
+
+cat >"$USR_UNIT_DIR/sunshine.service" <<EOF
+[Unit]
+Description=Sunshine Remote Play (user)
+After=graphical-session.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sunshine
+Restart=on-failure
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/${USER_UID}
+SupplementaryGroups=input
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
 EOF
-udevadm control --reload-rules || true
-udevadm trigger || true
+chown "${USER_NAME}:${USER_NAME}" "$USR_UNIT_DIR/sunshine.service"
+
+# Start as user
+su - "${USER_NAME}" -c 'systemctl --user daemon-reload'
+su - "${USER_NAME}" -c 'systemctl --user enable --now sunshine' || true
+step "7.1/11 Bật uinput + quyền truy cập thiết bị input cho Sunshine"
 
 # Cài công cụ test input (tùy chọn)
 apt -y install evtest joystick >>"$LOG" 2>&1 || true
@@ -286,27 +289,65 @@ systemctl restart sunshine || true
 # =================== Sunshine: cài ViGEmBus/vgamepad cho gamepad ảo ===================
 step "7.2/11 Cài Virtual Gamepad (ViGEmBus/vgamepad)"
 
-# Cần DKMS để build kernel module
+# Yêu cầu build module kernel
 apt -y install dkms build-essential linux-headers-$(uname -r) git >>"$LOG" 2>&1 || true
 
-# Clone repo vgamepad (Linux Virtual Gamepad)
-if [ ! -d /usr/src/vgamepad-0.1 ]; then
-  git clone --depth=1 https://github.com/ViGEm/vgamepad.git /tmp/vgamepad
-  dkms add /tmp/vgamepad || true
-  dkms build vgamepad/0.1 || true
-  dkms install vgamepad/0.1 || true
+# Cài vgamepad (kernel module) qua DKMS
+if ! lsmod | grep -q '^vgamepad'; then
+  TMP_VGP="/tmp/vgamepad_$(date +%s)"
+  rm -rf "$TMP_VGP"
+  git clone --depth=1 https://github.com/ViGEm/vgamepad.git "$TMP_VGP" >>"$LOG" 2>&1 || true
+  if [ -f "$TMP_VGP/dkms.conf" ] || [ -f "$TMP_VGP/Makefile" ]; then
+    VGP_VER="$(grep -Eo 'PACKAGE_VERSION.?=.+' "$TMP_VGP/dkms.conf" 2>/dev/null | awk -F= '{print $2}' | tr -d ' \"' || echo 0.1)"
+    VGP_VER="${VGP_VER:-0.1}"
+    DEST="/usr/src/vgamepad-${VGP_VER}"
+    rm -rf "$DEST"
+    mkdir -p "$DEST"
+    cp -a "$TMP_VGP/"* "$DEST/"
+    dkms add "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
+    dkms build "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
+    dkms install "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
+  fi
+  modprobe vgamepad || true
 fi
 
-# Nạp module ngay
-modprobe vgamepad || true
-
-# Cho phép Sunshine sử dụng device vgamepad
+# Udev rules để Sunshine truy cập thiết bị
 cat >/etc/udev/rules.d/61-vgamepad.rules <<'EOF'
 KERNEL=="vgamepad*", MODE="0660", GROUP="input"
 EOF
-
 udevadm control --reload-rules || true
 udevadm trigger || true
+
+# =================== Sunshine input permission hardening (runtime fix) ===================
+step "7.3/11 Fix quyền thiết bị input (runtime) + restart Sunshine"
+
+# Bảo đảm user nằm trong group input
+groupadd -f input
+usermod -aG input "${USER_NAME}" || true
+
+# Nếu thiết bị đã tồn tại, chỉnh quyền ngay lập tức
+fix_input_perms() {
+  for dev in /dev/uinput /dev/input/event* /dev/vgamepad*; do
+    [ -e "$dev" ] || continue
+    chgrp input "$dev" 2>/dev/null || true
+    chmod 660 "$dev" 2>/dev/null || true
+  done
+}
+fix_input_perms
+
+# Reload udev để áp dụng rules đã tạo
+udevadm control --reload-rules || true
+udevadm trigger || true
+
+# Đảm bảo service Sunshine có group input
+install -d /etc/systemd/system/sunshine.service.d
+cat >/etc/systemd/system/sunshine.service.d/10-input.conf <<'EOF'
+[Service]
+SupplementaryGroups=input
+EOF
+
+systemctl daemon-reload
+systemctl restart sunshine || true
 
 # =================== Shortcuts ra Desktop ===================
 step "8/11 Tạo shortcut Steam, Moonlight (Sunshine Web UI), Chromium ra Desktop"
