@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# lt4c_full_tigervnc_sunshine_autoapps_deb.sh
-# XFCE + XRDP (tuned) + TigerVNC (:0) + Sunshine Remote Play from .deb (+ auto-add apps) + Steam (Flatpak)
+# lt4c_full_tigervnc_sunshine_autoapps_deb.sh (patched)
+# XFCE + XRDP (tuned) + TigerVNC (:0) + Sunshine Remote Play (.deb + auto-add apps) + Steam (Flatpak) + Chromium (Flatpak)
 # Tối ưu: tắt compositor XFCE, 16-bit RDP, nén, fastpath, tcp_low_latency, in IP + debug
+# Thêm: icon Desktop cho Steam, Moonlight (Sunshine Web UI), Chromium
 
 set -Eeuo pipefail
 
@@ -11,14 +12,14 @@ export NEEDRESTART_MODE=a
 export APT_LISTCHANGES_FRONTEND=none
 LOG="/var/log/a_sh_install.log"
 
-USER_NAME="lt4c"
-USER_PASS="lt4c"
-VNC_PASS="lt4c"
-GEOM="1280x720"
-VNC_PORT="5900"
-SUN_HTTP_TLS_PORT="47990"
+USER_NAME="${USER_NAME:-lt4c}"
+USER_PASS="${USER_PASS:-lt4c}"
+VNC_PASS="${VNC_PASS:-lt4c}"
+GEOM="${GEOM:-1280x720}"
+VNC_PORT="${VNC_PORT:-5900}"
+SUN_HTTP_TLS_PORT="${SUN_HTTP_TLS_PORT:-47990}"
 
-SUN_DEB_URL="https://github.com/LizardByte/Sunshine/releases/download/v2025.628.4510/sunshine-ubuntu-22.04-amd64.deb"
+SUN_DEB_URL="${SUN_DEB_URL:-https://github.com/LizardByte/Sunshine/releases/download/v2025.628.4510/sunshine-ubuntu-22.04-amd64.deb}"
 
 step(){ echo "[BƯỚC] $*"; }
 
@@ -60,14 +61,18 @@ apt -y install \
   remmina remmina-plugin-rdp remmina-plugin-vnc neofetch kitty flatpak \
   mesa-vulkan-drivers libgl1-mesa-dri libasound2 libpulse0 libxkbcommon0 >>"$LOG" 2>&1
 
-# =================== STEAM (Flatpak) + Firefox + Heroic ===================
-step "3/11 Cài Firefox + Steam (Flatpak --system) & Heroic (user)"
+# =================== Steam/Chromium (Flatpak) + Heroic ===================
+step "3/11 Cài Chromium + Steam (Flatpak --system) & Heroic (user)"
 flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo >>"$LOG" 2>&1 || true
-flatpak -y --system install flathub org.mozilla.firefox com.valvesoftware.Steam >>"$LOG" 2>&1 || true
-printf '%s\n' '#!/bin/sh' 'exec flatpak run org.mozilla.firefox "$@"' >/usr/local/bin/firefox && chmod +x /usr/local/bin/firefox
+# Cài Chromium + Steam (hệ thống)
+flatpak -y --system install flathub org.chromium.Chromium com.valvesoftware.Steam >>"$LOG" 2>&1 || true
+# Shims tiện gọi nhanh
+printf '%s\n' '#!/bin/sh' 'exec flatpak run org.chromium.Chromium "$@"' >/usr/local/bin/chromium && chmod +x /usr/local/bin/chromium
 printf '%s\n' '#!/bin/sh' 'exec flatpak run com.valvesoftware.Steam "$@"' >/usr/local/bin/steam && chmod +x /usr/local/bin/steam
+# Heroic (cài theo user)
 su - "$USER_NAME" -c 'flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo' >>"$LOG" 2>&1 || true
 su - "$USER_NAME" -c 'flatpak -y install flathub com.heroicgameslauncher.hgl' >>"$LOG" 2>&1 || true
+# Bảo đảm XDG paths có Flatpak exports
 cat >/etc/profile.d/flatpak-xdg.sh <<'EOF'
 export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/var/lib/flatpak/exports/share:$HOME/.local/share/flatpak/exports/share"
 EOF
@@ -154,26 +159,26 @@ systemctl daemon-reload
 systemctl enable --now vncserver@0.service >>"$LOG" 2>&1 || true
 
 # =================== Sunshine from .deb (+ auto-add apps) ===================
-step "7/11 Cài Sunshine (.deb) + auto-add Firefox & Steam"
+step "7/11 Cài Sunshine (.deb) + auto-add Steam & Chromium"
 TMP_DEB="/tmp/sunshine.deb"
 wget -O "$TMP_DEB" "$SUN_DEB_URL"
 dpkg -i "$TMP_DEB" || true
 apt -f install -y >>"$LOG" 2>&1 || true
 
-# apps.json nội dung
+# apps.json nội dung (chỉ app để stream)
 read -r -d '' APPS_JSON_CONTENT <<JSON
 {
   "apps": [
     {
-      "name": "Firefox",
-      "cmd": ["/usr/bin/flatpak", "run", "org.mozilla.firefox"],
+      "name": "Steam",
+      "cmd": ["/usr/bin/flatpak", "run", "com.valvesoftware.Steam"],
       "working_dir": "/home/${USER_NAME}",
       "image_path": "",
       "auto_detect": false
     },
     {
-      "name": "Steam",
-      "cmd": ["/usr/bin/flatpak", "run", "com.valvesoftware.Steam"],
+      "name": "Chromium",
+      "cmd": ["/usr/bin/flatpak", "run", "org.chromium.Chromium"],
       "working_dir": "/home/${USER_NAME}",
       "image_path": "",
       "auto_detect": false
@@ -210,9 +215,107 @@ install -d -m 0700 -o "$USER_UID" -g "$USER_UID" "/run/user/${USER_UID}" || true
 systemctl daemon-reload
 systemctl enable --now sunshine >>"$LOG" 2>&1 || true
 
-# =================== Steam shortcut ===================
-step "8/11 Tạo shortcut Steam cho XFCE"
-cat >/usr/share/applications/steam.desktop <<'EOF'
+# =================== Sunshine/Moonlight: enable virtual input (kb/mouse/gamepad) ===================
+step "7.1/11 Bật uinput + quyền truy cập thiết bị input cho Sunshine"
+
+# =================== Sunshine: cài ViGEmBus/vgamepad cho gamepad ảo ===================
+step "7.2/11 Cài Virtual Gamepad (ViGEmBus/vgamepad)"
+
+# Yêu cầu build module kernel
+apt -y install dkms build-essential linux-headers-$(uname -r) git >>"$LOG" 2>&1 || true
+
+# Cài vgamepad (kernel module) qua DKMS
+if ! lsmod | grep -q '^vgamepad'; then
+  TMP_VGP="/tmp/vgamepad_$(date +%s)"
+  rm -rf "$TMP_VGP"
+  git clone --depth=1 https://github.com/ViGEm/vgamepad.git "$TMP_VGP" >>"$LOG" 2>&1 || true
+  if [ -f "$TMP_VGP/dkms.conf" ] || [ -f "$TMP_VGP/Makefile" ]; then
+    # Chuẩn hoá version nếu có metadata
+    VGP_VER="$(grep -Eo 'PACKAGE_VERSION.?=.+' "$TMP_VGP/dkms.conf" 2>/dev/null | awk -F= '{print $2}' | tr -d ' \"' || echo 0.1)"
+    VGP_VER="${VGP_VER:-0.1}"
+    # Đặt vào /usr/src để dkms add
+    DEST="/usr/src/vgamepad-${VGP_VER}"
+    rm -rf "$DEST"
+    mkdir -p "$DEST"
+    cp -a "$TMP_VGP/"* "$DEST/"
+    dkms add "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
+    dkms build "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
+    dkms install "vgamepad/${VGP_VER}" >>"$LOG" 2>&1 || true
+  fi
+  modprobe vgamepad || true
+fi
+
+# Udev rules để Sunshine truy cập thiết bị
+cat >/etc/udev/rules.d/61-vgamepad.rules <<'EOF'
+KERNEL=="vgamepad*", MODE="0660", GROUP="input"
+EOF
+udevadm control --reload-rules || true
+udevadm trigger || true
+
+# Cài công cụ test input (tùy chọn)
+apt -y install evtest joystick >>"$LOG" 2>&1 || true
+
+# Bật kernel module uinput lúc boot và ngay lập tức
+echo uinput >/etc/modules-load.d/uinput.conf
+modprobe uinput || true
+
+# Cho phép user truy cập /dev/uinput và /dev/input/event*
+# (Sunshine chạy dưới user ${USER_NAME})
+groupadd -f input
+usermod -aG input "${USER_NAME}"
+
+# Quyền udev cho thiết bị input
+cat >/etc/udev/rules.d/60-sunshine-input.rules <<'EOF'
+KERNEL=="uinput", MODE="0660", GROUP="input", OPTIONS+="static_node=uinput"
+SUBSYSTEM=="input", KERNEL=="event*", MODE="0660", GROUP="input"
+EOF
+
+udevadm control --reload-rules || true
+udevadm trigger || true
+
+# Bảo đảm service Sunshine có group input
+install -d /etc/systemd/system/sunshine.service.d
+cat >/etc/systemd/system/sunshine.service.d/10-input.conf <<'EOF'
+[Service]
+SupplementaryGroups=input
+EOF
+
+systemctl daemon-reload
+systemctl restart sunshine || true
+
+# =================== Sunshine: cài ViGEmBus/vgamepad cho gamepad ảo ===================
+step "7.2/11 Cài Virtual Gamepad (ViGEmBus/vgamepad)"
+
+# Cần DKMS để build kernel module
+apt -y install dkms build-essential linux-headers-$(uname -r) git >>"$LOG" 2>&1 || true
+
+# Clone repo vgamepad (Linux Virtual Gamepad)
+if [ ! -d /usr/src/vgamepad-0.1 ]; then
+  git clone --depth=1 https://github.com/ViGEm/vgamepad.git /tmp/vgamepad
+  dkms add /tmp/vgamepad || true
+  dkms build vgamepad/0.1 || true
+  dkms install vgamepad/0.1 || true
+fi
+
+# Nạp module ngay
+modprobe vgamepad || true
+
+# Cho phép Sunshine sử dụng device vgamepad
+cat >/etc/udev/rules.d/61-vgamepad.rules <<'EOF'
+KERNEL=="vgamepad*", MODE="0660", GROUP="input"
+EOF
+
+udevadm control --reload-rules || true
+udevadm trigger || true
+
+# =================== Shortcuts ra Desktop ===================
+step "8/11 Tạo shortcut Steam, Moonlight (Sunshine Web UI), Chromium ra Desktop"
+
+DESKTOP_DIR="/home/$USER_NAME/Desktop"
+install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" "$DESKTOP_DIR"
+
+# Steam (Flatpak)
+cat >"$DESKTOP_DIR/steam.desktop" <<'EOF'
 [Desktop Entry]
 Name=Steam
 Comment=Steam (Flatpak)
@@ -222,11 +325,35 @@ Terminal=false
 Type=Application
 Categories=Game;
 EOF
-install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.local/share/applications"
-cp /usr/share/applications/steam.desktop "/home/$USER_NAME/.local/share/applications/steam.desktop"
-chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.local/share/applications/steam.desktop"
+
+# Moonlight (mở Sunshine Web UI trong Chromium)
+cat >"$DESKTOP_DIR/moonlight.desktop" <<EOF
+[Desktop Entry]
+Name=Moonlight (Sunshine Web UI)
+Comment=Open Sunshine pairing UI for Moonlight
+Exec=flatpak run org.chromium.Chromium https://localhost:${SUN_HTTP_TLS_PORT}
+Icon=sunshine
+Terminal=false
+Type=Application
+Categories=Network;Game;Settings;
+EOF
+
+# Chromium
+cat >"$DESKTOP_DIR/chromium.desktop" <<'EOF'
+[Desktop Entry]
+Name=Chromium
+Exec=flatpak run org.chromium.Chromium
+Icon=org.chromium.Chromium
+Terminal=false
+Type=Application
+Categories=Network;WebBrowser;
+EOF
+
+chown -R "$USER_NAME:$USER_NAME" "$DESKTOP_DIR"
+chmod +x "$DESKTOP_DIR"/*.desktop
+# Cập nhật database để icon/launcher hiện chuẩn trong menu
 update-desktop-database /usr/share/applications || true
-su - "$USER_NAME" -c 'update-desktop-database ~/.local/share/applications || true'
+su - "$USER_NAME" -c 'update-desktop-database ~/.local/share/applications || true' >>"$LOG" 2>&1 || true
 pkill -HUP xfconfd || true
 
 # =================== TCP low latency + optional ufw allow ===================
@@ -260,7 +387,8 @@ IP="${IP:-<no-ip-detected>}"
 
 echo "TigerVNC : ${IP}:${VNC_PORT}  (pass: ${VNC_PASS})"
 echo "XRDP     : ${IP}:3389        (user ${USER_NAME} / ${USER_PASS})"
-echo "Sunshine : https://${IP}:${SUN_HTTP_TLS_PORT}  (đã auto-add Firefox & Steam; web UI self-signed cert)"
+echo "Sunshine : https://${IP}:${SUN_HTTP_TLS_PORT}  (UI tự ký; auto-add Steam & Chromium)"
+echo "Moonlight: Mở shortcut 'Moonlight (Sunshine Web UI)' trên Desktop để pair"
 
 echo "---- DEBUG ----"
 ip -o -4 addr show up | awk '{print $2, $4}' || true
