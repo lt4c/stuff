@@ -1,119 +1,67 @@
 #!/usr/bin/env bash
-# lt4c_full_tigervnc_sunshine_autoapps_deb.sh
-# XFCE + XRDP (tuned) + TigerVNC (:0) + Sunshine Remote Play from .deb (+ auto-add apps) + Steam (Flatpak)
-# Tối ưu: tắt compositor XFCE, 16-bit RDP, nén, fastpath, tcp_low_latency, in IP + debug
-
 set -Eeuo pipefail
 
-# ======================= CONFIG =======================
+# =========================
+# LT4C — Sunshine-only (WebUI external) + TigerVNC + XFCE + Flatpak (Firefox, VSCode) + Moonlight apps
+# =========================
+# ENV overrideable
+USER_NAME="${USER_NAME:-lt4c}"
+USER_PASS="${USER_PASS:-lt4c}"
+VNC_PASS="${VNC_PASS:-lt4c}"
+GEOM="${GEOM:-1280x720}"
+VNC_PORT="${VNC_PORT:-5900}"
+SUN_HTTP_TLS_PORT="${SUN_HTTP_TLS_PORT:-47990}"
+
+LOGDIR="/srv/lab"
+mkdir -p "$LOGDIR"
+exec > >(tee -a "$LOGDIR/lt4c_sunshine_only_$(date +%Y%m%d_%H%M%S).log") 2>&1
+
+step(){ echo "[INFO] $*"; }
+
+step "0/12 Prepare base"
 export DEBIAN_FRONTEND=noninteractive
-export NEEDRESTART_MODE=a
-export APT_LISTCHANGES_FRONTEND=none
-LOG="/var/log/a_sh_install.log"
+apt update -qq || true
+apt -y install --no-install-recommends \
+  ca-certificates curl wget sudo dbus-x11 xdg-utils desktop-file-utils xfconf iproute2 \
+  flatpak xfce4 xfce4-goodies xorg tigervnc-standalone-server \
+  mesa-vulkan-drivers libgl1-mesa-dri libasound2 libpulse0 libxkbcommon0 -y
 
-USER_NAME="lt4c"
-USER_PASS="lt4c"
-VNC_PASS="lt4c"
-GEOM="1280x720"
-VNC_PORT="5900"
-SUN_HTTP_TLS_PORT="47990"
+# ---------------- Xóa XRDP (nếu có) ----------------
+step "1/12 Remove XRDP (use VNC + Sunshine only)"
+apt -y purge xrdp xorgxrdp || true
+systemctl disable --now xrdp || true
+rm -f /etc/xrdp/startwm.sh || true
 
-SUN_DEB_URL="https://github.com/LizardByte/Sunshine/releases/download/v2025.628.4510/sunshine-ubuntu-22.04-amd64.deb"
-
-step(){ echo "[BƯỚC] $*"; }
-
-# =================== PREPARE ===================
-: >"$LOG"
-apt update -qq >>"$LOG" 2>&1 || true
-apt -y install tmux iproute2 >>"$LOG" 2>&1 || true
-
-step "0/11 Chuẩn bị môi trường & công cụ cơ bản"
-mkdir -p /etc/needrestart/conf.d
-echo '$nrconf{restart} = "a";' >/etc/needrestart/conf.d/zzz-auto.conf || true
-apt -y purge needrestart >>"$LOG" 2>&1 || true
-systemctl stop unattended-upgrades >>"$LOG" 2>&1 || true
-systemctl disable unattended-upgrades >>"$LOG" 2>&1 || true
-apt -y -o Dpkg::Use-Pty=0 install \
-  curl wget ca-certificates gnupg gnupg2 lsb-release apt-transport-https software-properties-common \
-  sudo dbus-x11 xdg-utils desktop-file-utils xfconf >>"$LOG" 2>&1
-
-# Cleanup nếu trước đó đã có code/x11vnc
-apt -y purge code x11vnc >>"$LOG" 2>&1 || true
-systemctl disable --now x11vnc.service >>"$LOG" 2>&1 || true
-rm -f /etc/systemd/system/x11vnc.service
-
-# =================== USER ===================
-step "1/11 Tạo user ${USER_NAME}"
+# ---------------- User ----------------
+step "2/12 Ensure user ${USER_NAME} exists"
 if ! id -u "$USER_NAME" >/dev/null 2>&1; then
-  adduser --disabled-password --gecos "LT4C" "$USER_NAME" >>"$LOG" 2>&1
+  adduser --disabled-password --gecos "LT4C" "$USER_NAME"
   echo "${USER_NAME}:${USER_PASS}" | chpasswd
   usermod -aG sudo "$USER_NAME"
 fi
 USER_UID="$(id -u "$USER_NAME")"
 
-# =================== DESKTOP + XRDP + TigerVNC ===================
-step "2/11 Cài XFCE + XRDP + TigerVNC"
-apt -y install \
-  xfce4 xfce4-goodies xorg \
-  xrdp xorgxrdp pulseaudio \
-  tigervnc-standalone-server \
-  remmina remmina-plugin-rdp remmina-plugin-vnc neofetch kitty flatpak \
-  mesa-vulkan-drivers libgl1-mesa-dri libasound2 libpulse0 libxkbcommon0 >>"$LOG" 2>&1
+# ---------------- Flatpak + Apps ----------------
+step "3/12 Flatpak flathub + Firefox + VSCode"
+flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo || true
+flatpak -y --system install flathub org.mozilla.firefox com.visualstudio.code || true
 
-# =================== STEAM (Flatpak) + Firefox + Heroic ===================
-step "3/11 Cài Firefox + Steam (Flatpak --system) & Heroic (user)"
-flatpak remote-add --if-not-exists --system flathub https://flathub.org/repo/flathub.flatpakrepo >>"$LOG" 2>&1 || true
-flatpak -y --system install flathub org.mozilla.firefox com.valvesoftware.Steam >>"$LOG" 2>&1 || true
+# small launchers for convenience
 printf '%s\n' '#!/bin/sh' 'exec flatpak run org.mozilla.firefox "$@"' >/usr/local/bin/firefox && chmod +x /usr/local/bin/firefox
-printf '%s\n' '#!/bin/sh' 'exec flatpak run com.valvesoftware.Steam "$@"' >/usr/local/bin/steam && chmod +x /usr/local/bin/steam
-su - "$USER_NAME" -c 'flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo' >>"$LOG" 2>&1 || true
-su - "$USER_NAME" -c 'flatpak -y install flathub com.heroicgameslauncher.hgl' >>"$LOG" 2>&1 || true
+printf '%s\n' '#!/bin/sh' 'exec flatpak run com.visualstudio.code "$@"' >/usr/local/bin/code && chmod +x /usr/local/bin/code
+
+# make flathub apps discoverable
 cat >/etc/profile.d/flatpak-xdg.sh <<'EOF'
 export XDG_DATA_DIRS="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}:/var/lib/flatpak/exports/share:$HOME/.local/share/flatpak/exports/share"
 EOF
 chmod +x /etc/profile.d/flatpak-xdg.sh
 
-# =================== XRDP: session + tuning ===================
-step "4/11 Cấu hình XRDP dùng XFCE + tối ưu hiệu năng"
-adduser xrdp ssl-cert >>"$LOG" 2>&1 || true
-su - "$USER_NAME" -c 'echo "startxfce4" > ~/.xsession'
-cat >/etc/xrdp/startwm.sh <<'EOF'
-#!/bin/sh
-export DESKTOP_SESSION=xfce
-export XDG_SESSION_TYPE=x11
-exec startxfce4
-EOF
-chmod +x /etc/xrdp/startwm.sh
-systemctl enable --now xrdp >>"$LOG" 2>&1 || true
-
-# Tune /etc/xrdp/xrdp.ini
-if [ -f /etc/xrdp/xrdp.ini ]; then
-  awk '
-    BEGIN{printed=0}
-    /^\[Globals\]$/ {
-      print "[Globals]";
-      print "bitmap_compression=true";
-      print "bulk_compression=true";
-      print "use_fastpath=both";
-      print "tcp_nodelay=true";
-      print "tcp_keepalive=true";
-      print "crypt_level=low";
-      print "allow_channels=false";
-      print "max_bpp=16";
-      skip=1; next
-    }
-    /^\[/ { if(skip){skip=0} }
-    { if(!skip) print }
-  ' /etc/xrdp/xrdp.ini > /etc/xrdp/xrdp.ini.new && mv /etc/xrdp/xrdp.ini.new /etc/xrdp/xrdp.ini
-fi
-systemctl restart xrdp || true
-
-# =================== XFCE: tắt compositor ===================
-step "5/11 Tắt compositor/hiệu ứng của XFCE (giảm lag)"
+# ---------------- XFCE compositor off (giảm lag) ----------------
+step "4/12 Disable XFCE compositor (best-effort)"
 su - "$USER_NAME" -c 'xfconf-query -c xfwm4 -p /general/use_compositing -s false' || true
 
-# =================== TigerVNC server (:0) ===================
-step "6/11 Cấu hình TigerVNC :0 (${GEOM})"
+# ---------------- TigerVNC :0 ----------------
+step "5/12 Configure TigerVNC :0 (${GEOM})"
 install -d -m 700 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.vnc"
 su - "$USER_NAME" -c "printf '%s\n' '$VNC_PASS' | vncpasswd -f > ~/.vnc/passwd"
 chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.vnc/passwd"
@@ -151,50 +99,66 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now vncserver@0.service >>"$LOG" 2>&1 || true
+systemctl enable --now vncserver@0.service || true
 
-# =================== Sunshine from .deb (+ auto-add apps) ===================
-step "7/11 Cài Sunshine (.deb) + auto-add Firefox & Steam"
-TMP_DEB="/tmp/sunshine.deb"
-wget -O "$TMP_DEB" "$SUN_DEB_URL"
-dpkg -i "$TMP_DEB" || true
-apt -f install -y >>"$LOG" 2>&1 || true
+# ---------------- Sunshine ----------------
+step "6/12 Install Sunshine (.deb)"
+SUN_DEB_URL="${SUN_DEB_URL:-https://github.com/LizardByte/Sunshine/releases/download/v2025.628.4510/sunshine-ubuntu-22.04-amd64.deb}"
+wget -O /tmp/sunshine.deb "$SUN_DEB_URL"
+dpkg -i /tmp/sunshine.deb || true
+apt -f install -y || true
 
-# apps.json nội dung
-read -r -d '' APPS_JSON_CONTENT <<JSON
+# ---------------- Sunshine apps ----------------
+step "7/12 Write Sunshine apps.json (VSCode, Desktop, Desktop Low Quality, XFCE Session, Firefox)"
+install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.config/sunshine"
+
+cat >"/home/$USER_NAME/.config/sunshine/apps.json" <<JSON
 {
   "apps": [
+    {
+      "name": "VSCode",
+      "cmd": ["/usr/bin/code"],
+      "working_dir": "/home/${USER_NAME}",
+      "auto_detect": false
+    },
+    {
+      "name": "Desktop",
+      "cmd": ["bash", "-lc", "sleep infinity"],
+      "working_dir": "/home/${USER_NAME}",
+      "auto_detect": false
+    },
+    {
+      "name": "Desktop Low Quality",
+      "cmd": ["bash", "-lc", "sleep infinity"],
+      "working_dir": "/home/${USER_NAME}",
+      "auto_detect": false
+    },
+    {
+      "name": "XFCE Session",
+      "cmd": ["startxfce4"],
+      "working_dir": "/home/${USER_NAME}",
+      "auto_detect": false
+    },
     {
       "name": "Firefox",
       "cmd": ["/usr/bin/flatpak", "run", "org.mozilla.firefox"],
       "working_dir": "/home/${USER_NAME}",
-      "image_path": "",
-      "auto_detect": false
-    },
-    {
-      "name": "Steam",
-      "cmd": ["/usr/bin/flatpak", "run", "com.valvesoftware.Steam"],
-      "working_dir": "/home/${USER_NAME}",
-      "image_path": "",
       "auto_detect": false
     }
   ]
 }
 JSON
-
-# Per-user config
-install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.config/sunshine"
-printf '%s\n' "$APPS_JSON_CONTENT" >"/home/$USER_NAME/.config/sunshine/apps.json"
-chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.config/sunshine/apps.json"
+chown -R "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.config/sunshine"
 chmod 644 "/home/$USER_NAME/.config/sunshine/apps.json"
 
-# System scope
+# also provide system-scope copy
 install -d -m 0755 /var/lib/sunshine
-printf '%s\n' "$APPS_JSON_CONTENT" > /var/lib/sunshine/apps.json
+cp -f "/home/$USER_NAME/.config/sunshine/apps.json" /var/lib/sunshine/apps.json || true
 chown sunshine:sunshine /var/lib/sunshine/apps.json 2>/dev/null || true
-chmod 644 /var/lib/sunshine/apps.json
+chmod 644 /var/lib/sunshine/apps.json || true
 
-# Override systemd: chạy dưới user lt4c với DISPLAY :0
+# ---------------- Sunshine systemd override & runtime ----------------
+step "8/12 Systemd override: run Sunshine as ${USER_NAME} on :0 and allow WebUI on external IP"
 install -d /etc/systemd/system/sunshine.service.d
 cat >/etc/systemd/system/sunshine.service.d/override.conf <<EOF
 [Service]
@@ -204,88 +168,51 @@ Environment=DISPLAY=:0
 Environment=XDG_RUNTIME_DIR=/run/user/${USER_UID}
 EOF
 
-# Tạo runtime dir nếu thiếu
 install -d -m 0700 -o "$USER_UID" -g "$USER_UID" "/run/user/${USER_UID}" || true
 
 systemctl daemon-reload
-systemctl enable --now sunshine >>"$LOG" 2>&1 || true
+systemctl enable --now sunshine || true
 
-# =================== Steam shortcut ===================
-step "8/11 Tạo shortcut Steam cho XFCE"
-cat >/usr/share/applications/steam.desktop <<'EOF'
-[Desktop Entry]
-Name=Steam
-Comment=Steam (Flatpak)
-Exec=flatpak run com.valvesoftware.Steam
-Icon=com.valvesoftware.Steam
-Terminal=false
-Type=Application
-Categories=Game;
-EOF
-install -d -m 0755 -o "$USER_NAME" -g "$USER_NAME" "/home/$USER_NAME/.local/share/applications"
-cp /usr/share/applications/steam.desktop "/home/$USER_NAME/.local/share/applications/steam.desktop"
-chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.local/share/applications/steam.desktop"
-update-desktop-database /usr/share/applications || true
-su - "$USER_NAME" -c 'update-desktop-database ~/.local/share/applications || true'
-pkill -HUP xfconfd || true
-
-# =================== TCP low latency + optional ufw allow ===================
-step "9/11 Bật TCP low latency + mở cổng (nếu có ufw)"
-cat >/etc/sysctl.d/90-remote-desktop.conf <<'EOF'
-net.ipv4.tcp_low_latency = 1
-EOF
-sysctl --system >/dev/null 2>&1 || true
-
-if command -v ufw >/dev/null 2>&1; then
-  ufw allow 3389/tcp || true
-  ufw allow ${VNC_PORT}/tcp || true
-  ufw allow ${SUN_HTTP_TLS_PORT}/tcp || true
-  ufw allow 47984:47990/tcp || true
-  ufw allow 47998:48010/udp || true
-fi
-
-# =================== DONE + PRINT IP ===================
-step "10/11 Hoàn tất (log: $LOG)"
-get_ip() {
-  ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
-}
-IP="$(get_ip)"
-if [ -z "$IP" ]; then
-  IP="$(ip -o -4 addr show up scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)"
-fi
-if [ -z "$IP" ] && command -v hostname >/dev/null 2>&1; then
-  IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-fi
-IP="${IP:-<no-ip-detected>}"
-
-echo "TigerVNC : ${IP}:${VNC_PORT}  (pass: ${VNC_PASS})"
-echo "XRDP     : ${IP}:3389        (user ${USER_NAME} / ${USER_PASS})"
-echo "Sunshine : https://${IP}:${SUN_HTTP_TLS_PORT}  (đã auto-add Firefox & Steam; web UI self-signed cert)"
-
-echo "---- DEBUG ----"
-ip -o -4 addr show up | awk '{print $2, $4}' || true
-ip route || true
-ss -ltnp | awk 'NR==1 || /:3389|:5900|:47990/' || true
-systemctl --no-pager --full status vncserver@0 | sed -n '1,25p' || true
-systemctl --no-pager --full status xrdp | sed -n '1,25p' || true
-systemctl --no-pager --full status sunshine | sed -n '1,25p' || true
-echo "--------------"
-
-step "11/11 DONE"
-
-
-# =================== HID virtual device permissions (uhid/hidraw) ===================
-step "7.1b/11 Bật uhid + quyền /dev/uhid và /dev/hidraw* (fix Permission denied khi tạo Xbox One controller)"
-
-# Nạp module uhid lúc boot và ngay
+# ---------------- HID permissions (controller / keyboard / mouse over Sunshine) ----------------
+step "9/12 Enable uhid + relaxed perms for uhid/uinput/hidraw (persistent)"
 echo uhid >/etc/modules-load.d/uhid.conf
 modprobe uhid || true
 
-# Udev rules cho uhid/hidraw
 cat >/etc/udev/rules.d/59-uhid-hidraw.rules <<'EOF'
 KERNEL=="uhid", MODE="0660", GROUP="input", OPTIONS+="static_node=uhid"
 SUBSYSTEM=="hidraw", KERNEL=="hidraw*", MODE="0660", GROUP="input"
+KERNEL=="uinput", MODE="0660", GROUP="input"
 EOF
-
 udevadm control --reload-rules || true
 udevadm trigger || true
+
+# Apply immediately this boot (best-effort)
+sh -c 'chgrp input /dev/uhid /dev/uinput /dev/hidraw* 2>/dev/null || true; chmod 660 /dev/uhid /dev/uinput /dev/hidraw* 2>/dev/null || true'
+
+# ---------------- Open firewall ports ----------------
+step "10/12 Open ports for Sunshine & VNC (if UFW present)"
+if command -v ufw >/dev/null 2>&1; then
+  ufw allow "${VNC_PORT}"/tcp || true
+  ufw allow "${SUN_HTTP_TLS_PORT}"/tcp || true    # Sunshine WebUI (HTTPS)
+  ufw allow 47984:47990/tcp || true               # Sunshine GameStream TCP
+  ufw allow 47998:48010/udp || true               # Sunshine GameStream UDP
+fi
+
+# ---------------- Print IPs + quick status ----------------
+step "11/12 Print endpoints"
+get_ip() {
+  ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}'
+}
+IP="$(get_ip)"; IP="${IP:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
+
+echo "VNC        : ${IP}:${VNC_PORT} (pass: ${VNC_PASS})"
+echo "SunshineUI : https://${IP}:${SUN_HTTP_TLS_PORT}  (self-signed cert; open from LAN)"
+echo "Moonlight  : Pair with the host '${IP}' (PIN shown in Moonlight)"
+
+echo "---- DEBUG ----"
+ss -ltnp | awk 'NR==1 || /:5900|:47990/' || true
+systemctl --no-pager --full status vncserver@0 | sed -n '1,25p' || true
+systemctl --no-pager --full status sunshine | sed -n '1,25p' || true
+echo "--------------"
+
+step "12/12 DONE"
