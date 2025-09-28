@@ -39,33 +39,44 @@ gzip -dc "$INITRD_PATH" | cpio -idmv
 echo "[4/6] Injecting SSH startup script and BusyBox..."
 mkdir -p "$WORKDIR/srv"
 
-curl ifconfig.me > "$WORKDIR/srv/lab"
-echo /win11/T4@123456 >> "$WORKDIR/srv/lab"
-
+# Busybox HTTP server
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
 
-cat <<EOF > "$WORKDIR/opt/bootlocal.sh"
+# Boot script
+cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
 #!/bin/sh
 
+# Lấy IP bằng DHCP
 sudo udhcpc
 
-echo "Installation started" >> /srv/lab
+# Lưu IP vào /srv/lab
+IPADDR=$(ip addr show dev eth0 | awk '/inet /{print $2}' | cut -d/ -f1)
+[ -z "$IPADDR" ] && IPADDR=$(ip route get 1 | awk '{print $7; exit}')
+echo "IP Address: $IPADDR" > /srv/lab
+echo "User: tc / Pass: (mặc định trống)" >> /srv/lab
+
+# Start HTTP server để xem log
+echo "Starting HTTP log server on port 80" >> /srv/lab
 su tc -c "sudo /srv/busybox httpd -p 80 -h /srv"
 
+# Cài các gói cần thiết
 su tc -c "tce-load -wi ntfs-3g"
 su tc -c "tce-load -wi gdisk"
 su tc -c "tce-load -wi openssh.tcz"
 
+# Start SSH
 sudo /usr/local/etc/init.d/openssh start
+echo "SSH server running at $IPADDR" >> /srv/lab
 
+# Thực hiện các lệnh cài đặt khác
 sudo sh -c "wget --no-check-certificate -O grub.gz $SWAP_URL"
 sudo gunzip -c grub.gz | dd of=/dev/sda bs=4M
 echo formatting sda to GPT NTFS >> /srv/lab
 sudo sgdisk -d 2 /dev/sda
 sudo sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda 
 sudo mkfs.ntfs -f /dev/sda2 -L HDD_DATA
-sudo sh -c '(wget --no-check-certificate -O- $GZ_LINK | gunzip | dd of=/dev/sdb bs=4M) & i=0; while kill -0 \$(pidof dd) 2>/dev/null; do echo "Installing... (\${i}s)"; echo "Installing... (\${i}s)" >> /srv/lab; sleep 1; i=\$((i+1)); done; echo "Done in \${i}s"; echo "Installing completed in \${i}s" >> /srv/lab'
+sudo sh -c '(wget --no-check-certificate -O- $GZ_LINK | gunzip | dd of=/dev/sdb bs=4M) & i=0; while kill -0 \$(pidof dd) 2>/dev/null; do echo "Installing... (\${i}s)" >> /srv/lab; sleep 1; i=\$((i+1)); done; echo "Installing completed in \${i}s" >> /srv/lab'
 sleep 1
 sudo reboot
 EOF
