@@ -128,10 +128,10 @@ cd "$WORKDIR"
 find . | cpio -o -H newc | gzip -c > "$INITRD_PATCHED"
 
 echo "[6/6] Adding GRUB entry and setting default..."
-if ! grep -q "🔧 TinyCore SSH Auto" "$GRUB_ENTRY"; then
+if ! grep -q "TinyCore SSH Auto" "$GRUB_ENTRY"; then
 cat <<EOF >> "$GRUB_ENTRY"
 
-menuentry "🔧 TinyCore SSH Auto" {
+menuentry "TinyCore SSH Auto" {
     insmod part_gpt
     insmod ext2
     linux $KERNEL_PATH console=ttyS0 quiet
@@ -141,7 +141,7 @@ EOF
 fi
 
 # Set as default boot
-sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="🔧 TinyCore SSH Auto"/' "$GRUB_CFG" || echo 'GRUB_DEFAULT="🔧 TinyCore SSH Auto"' >> "$GRUB_CFG"
+sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT="TinyCore SSH Auto"/' "$GRUB_CFG" || echo 'GRUB_DEFAULT="TinyCore SSH Auto"' >> "$GRUB_CFG"
 sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1' >> "$GRUB_CFG"
 
 update-grub
