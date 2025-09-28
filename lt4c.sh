@@ -18,7 +18,7 @@ GRUB_ENTRY="/etc/grub.d/40_custom"
 GRUB_CFG="/etc/default/grub"
 BUSYBOX_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/busybox"
 SWAP_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/grubsdbuefiwin.gz"
-GZ_LINK="http://114.207.112.13:5500/uploads/quack.gz"
+GZ_LINK="http://dev-kr.quocanyt.com:5500/quack.gz"
 
 
 echo "[1/6] Installing dependencies..."
