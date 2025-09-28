@@ -130,6 +130,10 @@ fi
 
 # --- 7. HOÀN TẤT ---
 IP=$(hostname -I | awk '{print $1}')
+if [ -z "$IP" ]; then
+  IP=$(curl -s ifconfig.me || echo "127.0.0.1")
+fi
+
 echo "======================"
 echo "✅ CÀI ĐẶT HOÀN TẤT"
 echo "XRDP     : ${IP}:3389 (user: $USER_NAME)"
