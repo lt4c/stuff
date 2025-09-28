@@ -53,13 +53,13 @@ udhcpc -n -q -t 5
 echo "Installation started" >> /srv/lab
 su tc -c "/srv/busybox httpd -p 80 -h /srv"  # simple web log on :80
 
-# 2) Install X + VNC + xrdp
-su tc -c "tce-load -wi Xorg-7.7 flwm_topside Xlibs Xprogs xsetroot"
+# 2) Install Xfbdev + VNC + xrdp
+su tc -c "tce-load -wi Xfbdev flwm_topside Xlibs Xprogs xsetroot"
 su tc -c "tce-load -wi x11vnc"
 su tc -c "tce-load -wi xrdp"
 
 # 3) Start X session (display :0)
-su tc -c "Xorg -nolisten tcp :0 &"
+su tc -c "Xfbdev -nolisten tcp :0 &"
 sleep 2
 su tc -c "DISPLAY=:0 xsetroot -solid '#202020' && sleep 1"
 su tc -c "DISPLAY=:0 flwm_topside &"
@@ -69,7 +69,7 @@ sleep 2
 if [ ! -f /home/tc/.vnc/passwd ]; then
   su tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd 'lt4c2025' /home/tc/.vnc/passwd"
 fi
-su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -shared -rfbauth /home/tc/.vnc/passwd -bg"
+su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -loop -repeat -shared -rfbauth /home/tc/.vnc/passwd -bg"
 
 # 5) Configure xrdp to proxy to the running VNC (vnc-any)
 XRDP_INI="/usr/local/etc/xrdp/xrdp.ini"
@@ -94,10 +94,6 @@ sed -i 's/^address=.*/address=0.0.0.0/' "$XRDP_INI" 2>/dev/null || true
 # Quick logs
 echo "--- netstat ---" >> /srv/lab
 netstat -tlnp | grep -E ':(22|80|5900|3389)' >> /srv/lab 2>&1 || true
-echo "--- xrdp log ---" >> /srv/lab
-tail -n +200 /var/log/xrdp.log >> /srv/lab 2>&1 || true
-echo "--- sesman log ---" >> /srv/lab
-tail -n +200 /var/log/xrdp-sesman.log >> /srv/lab 2>&1 || true
 
 # 6) Persist VNC password if using filetool
 if ! grep -q '^home/tc/.vnc/passwd$' /opt/.filetool.lst 2>/dev/null; then
