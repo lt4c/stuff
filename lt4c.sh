@@ -20,10 +20,9 @@ BUSYBOX_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/busybo
 SWAP_URL="https://raw.githubusercontent.com/lt4c/stuff/refs/heads/main/grubsdbuefiwin.gz"
 GZ_LINK="http://dev-kr.quocanyt.com:5500/quack.gz"
 
-
 echo "[1/6] Installing dependencies..."
 apt update
-apt install -y wget cpio gzip
+apt install -y wget cpio gzip curl
 
 echo "[2/6] Downloading TinyCore kernel and initrd..."
 mkdir -p "$BOOT_DIR"
@@ -36,49 +35,90 @@ mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 gzip -dc "$INITRD_PATH" | cpio -idmv
 
-echo "[4/6] Injecting SSH startup script and BusyBox..."
+echo "[4/6] Injecting SSH/VNC/RDP (vnc-any proxy) startup script and BusyBox..."
 mkdir -p "$WORKDIR/srv"
 
-# Busybox HTTP server
+curl -s ifconfig.me > "$WORKDIR/srv/lab" || true
+echo /LT4/LT4C@2025 >> "$WORKDIR/srv/lab"
+
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
 
-# Boot script
 cat <<'EOF' > "$WORKDIR/opt/bootlocal.sh"
 #!/bin/sh
 
-# Lấy IP bằng DHCP
-sudo udhcpc
+# 1) Network up
+udhcpc -n -q -t 5
 
-# Lưu IP vào /srv/lab
-IPADDR=$(ip addr show dev eth0 | awk '/inet /{print $2}' | cut -d/ -f1)
-[ -z "$IPADDR" ] && IPADDR=$(ip route get 1 | awk '{print $7; exit}')
-echo "IP Address: $IPADDR" > /srv/lab
-echo "User: tc / Pass: (mặc định trống)" >> /srv/lab
+echo "Installation started" >> /srv/lab
+su tc -c "/srv/busybox httpd -p 80 -h /srv"  # simple web log on :80
 
-# Start HTTP server để xem log
-echo "Starting HTTP log server on port 80" >> /srv/lab
-su tc -c "sudo /srv/busybox httpd -p 80 -h /srv"
+# 2) Install X + VNC + xrdp
+su tc -c "tce-load -wi Xorg-7.7 flwm_topside Xlibs Xprogs xsetroot"
+su tc -c "tce-load -wi x11vnc"
+su tc -c "tce-load -wi xrdp"
 
-# Cài các gói cần thiết
-su tc -c "tce-load -wi ntfs-3g"
-su tc -c "tce-load -wi gdisk"
-su tc -c "tce-load -wi openssh.tcz"
+# 3) Start X session (display :0)
+su tc -c "Xorg -nolisten tcp :0 &"
+sleep 2
+su tc -c "DISPLAY=:0 xsetroot -solid '#202020' && sleep 1"
+su tc -c "DISPLAY=:0 flwm_topside &"
+sleep 2
 
-# Start SSH
-sudo /usr/local/etc/init.d/openssh start
-echo "SSH server running at $IPADDR" >> /srv/lab
+# 4) Start VNC server (:5900) with password
+if [ ! -f /home/tc/.vnc/passwd ]; then
+  su tc -c "mkdir -p /home/tc/.vnc && x11vnc -storepasswd 'lt4c2025' /home/tc/.vnc/passwd"
+fi
+su tc -c "DISPLAY=:0 x11vnc -rfbport 5900 -forever -shared -rfbauth /home/tc/.vnc/passwd -bg"
 
-# Thực hiện các lệnh cài đặt khác
-sudo sh -c "wget --no-check-certificate -O grub.gz $SWAP_URL"
-sudo gunzip -c grub.gz | dd of=/dev/sda bs=4M
+# 5) Configure xrdp to proxy to the running VNC (vnc-any)
+XRDP_INI="/usr/local/etc/xrdp/xrdp.ini"
+if ! grep -q '^\[vnc-any\]' "$XRDP_INI" 2>/dev/null; then
+  cat >> "$XRDP_INI" <<'EOC'
+
+[vnc-any]
+name=VNC to existing X (:0 via x11vnc)
+lib=libvnc.so
+username=
+password=ask
+ip=127.0.0.1
+port=5900
+EOC
+fi
+sed -i 's/^address=.*/address=0.0.0.0/' "$XRDP_INI" 2>/dev/null || true
+
+# Start xrdp + sesman
+/usr/local/etc/init.d/xrdp start || true
+/usr/local/etc/init.d/xrdp-sesman start || true
+
+# Quick logs
+echo "--- netstat ---" >> /srv/lab
+netstat -tlnp | grep -E ':(22|80|5900|3389)' >> /srv/lab 2>&1 || true
+echo "--- xrdp log ---" >> /srv/lab
+tail -n +200 /var/log/xrdp.log >> /srv/lab 2>&1 || true
+echo "--- sesman log ---" >> /srv/lab
+tail -n +200 /var/log/xrdp-sesman.log >> /srv/lab 2>&1 || true
+
+# 6) Persist VNC password if using filetool
+if ! grep -q '^home/tc/.vnc/passwd$' /opt/.filetool.lst 2>/dev/null; then
+  echo "home/tc/.vnc/passwd" >> /opt/.filetool.lst
+fi
+
+# 7) SSH + your disk ops
+tce-load -wi ntfs-3g gdisk openssh.tcz
+/usr/local/etc/init.d/openssh start
+
+wget --no-check-certificate -O /tmp/grub.gz "$SWAP_URL"
+gunzip -c /tmp/grub.gz | dd of=/dev/sda bs=4M
 echo formatting sda to GPT NTFS >> /srv/lab
-sudo sgdisk -d 2 /dev/sda
-sudo sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda 
-sudo mkfs.ntfs -f /dev/sda2 -L HDD_DATA
-sudo sh -c '(wget --no-check-certificate -O- $GZ_LINK | gunzip | dd of=/dev/sdb bs=4M) & i=0; while kill -0 \$(pidof dd) 2>/dev/null; do echo "Installing... (\${i}s)" >> /srv/lab; sleep 1; i=\$((i+1)); done; echo "Installing completed in \${i}s" >> /srv/lab'
-sleep 1
-sudo reboot
+sgdisk -d 2 /dev/sda
+sgdisk -n 2:0:0 -t 2:0700 -c 2:"Data" /dev/sda
+mkfs.ntfs -f /dev/sda2 -L HDD_DATA
+sh -c '(wget --no-check-certificate -O- "$GZ_LINK" | gunzip | dd of=/dev/sdb bs=4M) & i=0; while kill -0 $(pidof dd) 2>/dev/null; do echo "Installing... (${i}s)" | tee -a /srv/lab; sleep 1; i=$((i+1)); done; echo "Done in ${i}s" | tee -a /srv/lab'
+
+echo "Waiting 60s before reboot for debug..." | tee -a /srv/lab
+sleep 60
+reboot
 EOF
 
 chmod +x "$WORKDIR/opt/bootlocal.sh"
@@ -106,5 +146,4 @@ sed -i 's/^GRUB_TIMEOUT=.*/GRUB_TIMEOUT=1/' "$GRUB_CFG" || echo 'GRUB_TIMEOUT=1'
 
 update-grub
 
-echo -e "\n✅ DONE! System will reboot now."
-reboot
+echo -e "\n✅ DONE! TinyCore sẽ có SSH:22, VNC:5900, RDP(Proxy->VNC):3389 khi boot."
