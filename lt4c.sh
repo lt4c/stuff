@@ -28,19 +28,16 @@ if ! id -u "$USER_NAME" >/dev/null 2>&1; then
   usermod -aG sudo "$USER_NAME"
 fi
 
-# --- 2. CÀI MÔI TRƯỜNG DESKTOP + XRDP + VNC ---
-step "Cài desktop XFCE + XRDP + VNC"
-apt install -y xfce4 xfce4-goodies xorg xrdp xorgxrdp tigervnc-standalone-server \
-  remmina remmina-plugin-rdp remmina-plugin-vnc pulseaudio flatpak
-
-systemctl enable --now xrdp
+# --- 2. CÀI UBUNTU DESKTOP (GNOME) ---
+step "Cài Ubuntu Desktop (GNOME)"
+apt-get update -y
+apt-get install -y ubuntu-desktop
 
 # --- 3. CÀI ỨNG DỤNG FLATPAK ---
 step "Cài Chromium và Steam qua Flatpak"
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
 flatpak install -y flathub org.chromium.Chromium com.valvesoftware.Steam
 
-# Tạo shortcut chạy ứng dụng
 cat <<EOF >/usr/local/bin/chromium
 #!/bin/sh
 flatpak run org.chromium.Chromium "\$@"
@@ -63,12 +60,11 @@ cat <<EOF >"/home/$USER_NAME/.vnc/xstartup"
 #!/bin/sh
 unset SESSION_MANAGER
 unset DBUS_SESSION_BUS_ADDRESS
-exec startxfce4
+exec gnome-session
 EOF
 chmod +x "/home/$USER_NAME/.vnc/xstartup"
 chown -R "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.vnc"
 
-# Tạo systemd service cho VNC
 cat <<EOF >/etc/systemd/system/vncserver@.service
 [Unit]
 Description=TigerVNC cho display %i
@@ -93,7 +89,6 @@ step "Cài Sunshine"
 wget -qO /tmp/sunshine.deb "$SUN_DEB_URL"
 dpkg -i /tmp/sunshine.deb || apt -f install -y
 
-# Cho phép truy cập input device
 echo 'uinput' > /etc/modules-load.d/uinput.conf
 modprobe uinput || true
 groupadd -f input
@@ -107,7 +102,6 @@ EOF
 udevadm control --reload-rules
 udevadm trigger
 
-# Chạy Sunshine dưới quyền root
 mkdir -p /etc/systemd/system/sunshine.service.d
 cat <<EOF >/etc/systemd/system/sunshine.service.d/override.conf
 [Service]
