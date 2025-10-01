@@ -37,7 +37,7 @@ echo "[4/6] Injecting SSH startup script and BusyBox..."
 mkdir -p "$WORKDIR/srv"
 
 curl ifconfig.me > "$WORKDIR/srv/lab"
-echo /win11/T4@123456 >> "$WORKDIR/srv/lab"
+echo /Admin/Quackncloud@123 >> "$WORKDIR/srv/lab"
 
 wget -q -O "$WORKDIR/srv/busybox" "$BUSYBOX_URL"
 chmod +x "$WORKDIR/srv/busybox"
